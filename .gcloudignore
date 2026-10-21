@@ -1,0 +1,10 @@
+# Files left out of `gcloud run deploy --source .` uploads.
+# Without this file gcloud falls back to .gitignore, which doesn't exclude output/.
+.gcloudignore
+.git
+.github
+.env
+.env.*
+!.env.example
+node_modules
+output/
