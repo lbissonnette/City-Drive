@@ -29,13 +29,15 @@ exists), links billing, enables the APIs, and creates:
 | `city-drive-runtime` service account | What the app runs as. Can only read the Maps key secret |
 | Workload Identity pool + provider `github` | Lets GitHub Actions in `lbissonnette/City-Drive` (and no other repo) act as the deployer |
 | Secret `google-maps-api-key` | The Maps key, injected as `GOOGLE_MAPS_API_KEY` |
+| Bucket `<PROJECT_ID>-city-drive-video` | Saved frames, video job docs and finished videos, shared with the GPU worker |
+| `city-drive-gpu-worker` service account | What the GPU VM runs as. Read/write on the video bucket only |
 
 Optional settings: `REGION` (default `us-central1`), `MAPS_API_KEY` to store a key you
 already have instead of creating one, `GITHUB_REPO` if the repo moves, and
 `ORG_ID`/`FOLDER_ID` to create the project under an organization. The script is safe to
 re-run; it skips anything that already exists.
 
-At the end it prints four **repository variables** (not secrets, none of them are
+At the end it prints five **repository variables** (not secrets, none of them are
 sensitive). If the GitHub CLI (`gh`) is installed and signed in, it sets them for you;
 otherwise add them at
 [Settings > Secrets and variables > Actions > Variables](https://github.com/lbissonnette/City-Drive/settings/variables/actions):
@@ -46,6 +48,7 @@ otherwise add them at
 | `GCP_REGION` | `us-central1` |
 | `GCP_WIF_PROVIDER` | `projects/123456789/locations/global/workloadIdentityPools/github/providers/github` |
 | `GCP_DEPLOY_SA` | `city-drive-deployer@city-drive-12345.iam.gserviceaccount.com` |
+| `GCP_VIDEO_BUCKET` | `city-drive-12345-city-drive-video` (passed to the app as `VIDEO_BUCKET`) |
 
 The deploy job is skipped until `GCP_PROJECT_ID` is set, so merging the workflow before
 setup doesn't produce failing runs.
@@ -103,13 +106,20 @@ gcloud run services add-iam-policy-binding city-drive \
 
 Deploys from GitHub Actions keep whichever access you choose.
 
+## GPU video worker
+
+The video step runs on a separate GPU spot VM. See [worker/README.md](worker/README.md);
+in short, request spot RTX PRO 6000 quota, then
+`PROJECT_ID=$PROJECT_ID ./scripts/gpu-vm.sh up`.
+
 ## Limitations on Cloud Run
 
 - **Saved frames are temporary.** `Save frames` writes to the container's in-memory
   disk, which is wiped whenever the instance restarts or scales to zero (after roughly
   15 minutes idle). Download what you need right after saving. The service is capped at
-  one instance so the `/output/...` links keep working while it's up. Moving output to
-  a Cloud Storage bucket is the fix if this becomes a problem.
+  one instance so the `/output/...` links keep working while it's up. With
+  `GCP_VIDEO_BUCKET` set, frames are also copied to the bucket, which is what the
+  video step uses.
 - **The Maps key is visible to the browser** (the map needs it). The key the setup
   script creates is restricted to the three Maps APIs. If you make the service public,
   also add an HTTP-referrer restriction for your `*.run.app` URL, and put an

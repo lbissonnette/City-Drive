@@ -22,6 +22,8 @@ const state = {
   frameIndex: 0,
   playing: null,
   carMarker: null,
+  savedRun: null,    // { run, frames } from the last save, for the video step
+  videoPoll: null,
 };
 
 loadMaps();
@@ -58,6 +60,10 @@ window.initMap = function initMap() {
   $('playBtn').onclick = togglePlay;
   $('frameSlider').oninput = (e) => showFrame(Number(e.target.value));
   $('downloadBtn').onclick = downloadFrames;
+  $('videoSection').hidden = !window.CITY_DRIVE_CONFIG?.videoEnabled;
+  $('videoPrompt').value = window.CITY_DRIVE_CONFIG?.defaultPrompt || '';
+  $('videoStride').oninput = updateVideoInfo;
+  $('videoBtn').onclick = makeVideo;
 };
 
 // ---------- 1. Route ----------
@@ -382,11 +388,70 @@ async function downloadFrames() {
     $('downloadInfo').innerHTML = `Saved ${data.saved} frames${data.failed ? `, ${data.failed} failed` : ''} to ` +
       `<code>output/${data.run}/</code> (<a href="${data.baseUrl}manifest.json" target="_blank">manifest</a>).`;
     $('downloadInfo').classList.remove('error');
+    state.savedRun = data.inBucket ? { run: data.run, frames: data.saved } : null;
+    updateVideoInfo();
   } catch (err) {
     setStatus('downloadInfo', `Download failed: ${err.message}`, true);
   } finally {
     $('downloadBtn').disabled = false;
   }
+}
+
+// ---------- 5. Video (GPU worker) ----------
+
+function videoStride() {
+  return Math.max(1, Math.floor(Number($('videoStride').value) || 1));
+}
+
+function updateVideoInfo() {
+  const saved = state.savedRun;
+  $('videoBtn').disabled = !saved || saved.frames < 2;
+  if (!saved) return setStatus('videoInfo', 'Save frames first.');
+  // Matches the server's selection: every Nth frame plus the last one.
+  const used = Math.ceil(saved.frames / videoStride()) + ((saved.frames - 1) % videoStride() ? 1 : 0);
+  const clips = Math.max(0, used - 1);
+  setStatus('videoInfo', `${clips} clips from run ${saved.run}, about ${Math.round((clips * 81) / 16)} s of video.`);
+}
+
+async function makeVideo() {
+  $('videoBtn').disabled = true;
+  $('videoPlayer').hidden = true;
+  setStatus('videoStatus', 'Queueing…');
+  try {
+    const resp = await fetch('/api/video', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ run: state.savedRun.run, prompt: $('videoPrompt').value, stride: videoStride() }),
+    });
+    const data = await resp.json();
+    if (!resp.ok) throw new Error(data.error);
+    pollVideo(data.id);
+  } catch (err) {
+    setStatus('videoStatus', `Could not queue the video: ${err.message}`, true);
+    $('videoBtn').disabled = false;
+  }
+}
+
+async function pollVideo(id) {
+  clearTimeout(state.videoPoll);
+  try {
+    const resp = await fetch(`/api/video/${id}`);
+    const s = await resp.json();
+    if (!resp.ok) throw new Error(s.error);
+    const progress = s.state === 'running' ? ` (${s.step || 'clips'}: ${s.clipsDone}/${s.clipsTotal})` : '';
+    setStatus('videoStatus', `Job ${id}: ${s.state}${progress}${s.error ? ` – ${s.error}` : ''}`, s.state === 'failed');
+    if (s.state === 'done') {
+      $('videoPlayer').src = s.videoUrl;
+      $('videoPlayer').hidden = false;
+    }
+    if (s.state === 'done' || s.state === 'failed') {
+      $('videoBtn').disabled = false;
+      return;
+    }
+  } catch (err) {
+    setStatus('videoStatus', `Job ${id}: status check failed (${err.message}), retrying`, true);
+  }
+  state.videoPoll = setTimeout(() => pollVideo(id), 10000);
 }
 
 function resetScan() {

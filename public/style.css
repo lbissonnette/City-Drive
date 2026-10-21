@@ -16,6 +16,8 @@ button { padding: 6px 12px; border: 1px solid #bbb; border-radius: 6px; backgrou
 button.primary { background: #1a73e8; border-color: #1a73e8; color: #fff; }
 button:disabled { opacity: 0.5; cursor: default; }
 progress { width: 100%; margin-top: 8px; }
+textarea { width: 100%; font: inherit; margin: 4px 0; }
+#videoPlayer { width: 100%; margin-top: 8px; background: #000; }
 
 #yearChart { margin-top: 8px; }
 .bar { display: flex; align-items: center; gap: 6px; margin: 2px 0; font-size: 12px; cursor: pointer; }

@@ -7,6 +7,8 @@
 #   - city-drive-deployer SA (used by GitHub Actions) and city-drive-runtime SA (runs the app)
 #   - Workload Identity Federation pool/provider that only trusts this GitHub repo
 #   - a Google Maps API key stored in Secret Manager as google-maps-api-key
+#   - the video bucket shared by the app and the GPU worker, and the
+#     city-drive-gpu-worker SA the GPU VM runs as (see scripts/gpu-vm.sh)
 # Then prints the GitHub repository variables to add (or sets them with `gh` if it can).
 #
 # Safe to re-run: each step checks for what already exists.
@@ -32,17 +34,20 @@ REGION="${REGION:-us-central1}"
 GITHUB_REPO="${GITHUB_REPO:-lbissonnette/City-Drive}"
 BILLING_ACCOUNT="${BILLING_ACCOUNT:-}"
 MAPS_API_KEY="${MAPS_API_KEY:-}"
+VIDEO_BUCKET="${VIDEO_BUCKET:-${PROJECT_ID}-city-drive-video}"
 
 SERVICE=city-drive
 AR_REPO=city-drive
 DEPLOY_SA_NAME=city-drive-deployer
 RUNTIME_SA_NAME=city-drive-runtime
+WORKER_SA_NAME=city-drive-gpu-worker
 POOL=github
 PROVIDER=github
 SECRET=google-maps-api-key
 
 DEPLOY_SA="${DEPLOY_SA_NAME}@${PROJECT_ID}.iam.gserviceaccount.com"
 RUNTIME_SA="${RUNTIME_SA_NAME}@${PROJECT_ID}.iam.gserviceaccount.com"
+WORKER_SA="${WORKER_SA_NAME}@${PROJECT_ID}.iam.gserviceaccount.com"
 
 log() { printf '\n==> %s\n' "$*"; }
 gc() { gcloud --project="$PROJECT_ID" --quiet "$@"; }
@@ -89,7 +94,9 @@ gc services enable \
   apikeys.googleapis.com \
   maps-backend.googleapis.com \
   street-view-image-backend.googleapis.com \
-  routes.googleapis.com
+  routes.googleapis.com \
+  storage.googleapis.com \
+  compute.googleapis.com
 
 # --- Artifact Registry --------------------------------------------------------
 log "Artifact Registry repo $AR_REPO in $REGION"
@@ -112,8 +119,9 @@ ensure_sa() {
 log "Service accounts"
 ensure_sa "$DEPLOY_SA_NAME" "City Drive GitHub deployer"
 ensure_sa "$RUNTIME_SA_NAME" "City Drive Cloud Run runtime"
+ensure_sa "$WORKER_SA_NAME" "City Drive GPU video worker"
 # New service accounts take a few seconds to become visible to IAM policy calls.
-for sa in "$DEPLOY_SA" "$RUNTIME_SA"; do
+for sa in "$DEPLOY_SA" "$RUNTIME_SA" "$WORKER_SA"; do
   for _ in {1..10}; do gc iam service-accounts describe "$sa" >/dev/null 2>&1 && break; sleep 3; done
 done
 
@@ -157,6 +165,23 @@ gc secrets add-iam-policy-binding "$SECRET" \
   --member="serviceAccount:$RUNTIME_SA" --role=roles/secretmanager.secretAccessor >/dev/null
 echo "$RUNTIME_SA_NAME can read it."
 
+# --- Video bucket (frames, job docs, finished videos) ----------------------------
+log "Bucket gs://$VIDEO_BUCKET"
+if gcloud storage buckets describe "gs://$VIDEO_BUCKET" --project="$PROJECT_ID" >/dev/null 2>&1; then
+  echo "Exists."
+else
+  gcloud storage buckets create "gs://$VIDEO_BUCKET" --project="$PROJECT_ID" --location="$REGION" \
+    --uniform-bucket-level-access --public-access-prevention
+fi
+# The app writes frames + jobs and reads videos; the worker reads frames + jobs and writes videos.
+for sa in "$RUNTIME_SA" "$WORKER_SA"; do
+  gcloud storage buckets add-iam-policy-binding "gs://$VIDEO_BUCKET" --project="$PROJECT_ID" \
+    --member="serviceAccount:$sa" --role=roles/storage.objectAdmin >/dev/null
+  echo "roles/storage.objectAdmin for ${sa%%@*}"
+done
+gc projects add-iam-policy-binding "$PROJECT_ID" \
+  --member="serviceAccount:$WORKER_SA" --role=roles/logging.logWriter --condition=None >/dev/null
+
 # --- Workload Identity Federation ---------------------------------------------
 log "Workload Identity Federation for $GITHUB_REPO"
 if gc iam workload-identity-pools describe "$POOL" --location=global >/dev/null 2>&1; then
@@ -197,6 +222,7 @@ VARS=(
   "GCP_REGION=$REGION"
   "GCP_WIF_PROVIDER=$WIF_PROVIDER"
   "GCP_DEPLOY_SA=$DEPLOY_SA"
+  "GCP_VIDEO_BUCKET=$VIDEO_BUCKET"
 )
 if command -v gh >/dev/null && gh auth status >/dev/null 2>&1; then
   for kv in "${VARS[@]}"; do gh variable set "${kv%%=*}" --repo "$GITHUB_REPO" --body "${kv#*=}"; done
@@ -212,4 +238,7 @@ cat <<EOF
 Done. After the first deploy, open the app with:
   gcloud run services proxy $SERVICE --project=$PROJECT_ID --region=$REGION --port=3000
 then browse to http://localhost:3000. See DEPLOY.md for other ways to open it.
+
+To start the GPU video worker (see worker/README.md):
+  PROJECT_ID=$PROJECT_ID REGION=$REGION ./scripts/gpu-vm.sh up
 EOF
