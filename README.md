@@ -29,6 +29,11 @@ If you want to referrer-restrict the browser key, put a second key (not
 referrer-restricted) in `GOOGLE_MAPS_SERVER_KEY`. The server uses it for Routes and
 image downloads.
 
+## Deploying
+
+See [DEPLOY.md](DEPLOY.md) for running it on Google Cloud Run, with a one-time setup
+script and a GitHub Actions workflow that deploys on every push to `main`.
+
 ## Using it
 
 1. **Plot the drive.** Click the map to drop numbered waypoints (drag to adjust). With
@@ -79,4 +84,6 @@ server.js          Static file server + /api/route (Routes API) + /api/download 
 public/index.html  UI
 public/app.js      Map, route sampling, Street View scanning, year selection, preview
 public/style.css
+Dockerfile         Container for Cloud Run (see DEPLOY.md)
+scripts/gcp-setup.sh  One-time GCP project + GitHub Actions deploy setup
 ```

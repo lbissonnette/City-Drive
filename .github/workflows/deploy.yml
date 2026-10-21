@@ -1,0 +1,63 @@
+# Builds the container and deploys it to Cloud Run on every push to main.
+# Authenticates with Workload Identity Federation, so no service account keys
+# are stored in GitHub. One-time GCP setup and the repo variables it needs are
+# in DEPLOY.md. Until GCP_PROJECT_ID is set, the job is skipped.
+name: Deploy to Cloud Run
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: deploy-cloud-run
+  cancel-in-progress: false
+
+env:
+  SERVICE: city-drive
+  REGION: ${{ vars.GCP_REGION || 'us-central1' }}
+
+jobs:
+  deploy:
+    if: ${{ vars.GCP_PROJECT_ID != '' }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write # lets google-github-actions/auth mint an OIDC token
+    env:
+      IMAGE: ${{ vars.GCP_REGION || 'us-central1' }}-docker.pkg.dev/${{ vars.GCP_PROJECT_ID }}/city-drive/city-drive:${{ github.sha }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - id: auth
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ vars.GCP_WIF_PROVIDER }}
+          service_account: ${{ vars.GCP_DEPLOY_SA }}
+
+      - uses: google-github-actions/setup-gcloud@v2
+
+      - name: Build and push image
+        run: |
+          gcloud auth configure-docker "${REGION}-docker.pkg.dev" --quiet
+          docker build -t "$IMAGE" .
+          docker push "$IMAGE"
+
+      - id: deploy
+        uses: google-github-actions/deploy-cloudrun@v2
+        with:
+          service: ${{ env.SERVICE }}
+          region: ${{ env.REGION }}
+          image: ${{ env.IMAGE }}
+          # Saved frames live on the instance's in-memory disk, so keep a single
+          # instance or /output/ links can land on one that doesn't have them.
+          # Who can open the app is set by IAM (see DEPLOY.md), not here.
+          flags: >-
+            --service-account=city-drive-runtime@${{ vars.GCP_PROJECT_ID }}.iam.gserviceaccount.com
+            --max-instances=1
+            --memory=1Gi
+            --timeout=600
+          secrets: |
+            GOOGLE_MAPS_API_KEY=google-maps-api-key:latest
+
+      - run: echo "Deployed to ${{ steps.deploy.outputs.url }}"
