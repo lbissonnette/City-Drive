@@ -1,0 +1,73 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>City Drive</title>
+  <link rel="stylesheet" href="/style.css">
+</head>
+<body>
+  <aside id="panel">
+    <h1>City Drive</h1>
+    <p class="hint">Proof of concept: plot a drive, find Street View imagery from a chosen year along it, preview it, and save the frames.</p>
+
+    <section>
+      <h2>1. Plot the drive</h2>
+      <p class="hint">Click the map to drop waypoints in order.</p>
+      <label class="row"><input type="checkbox" id="followRoads" checked> Follow roads (driving route)</label>
+      <div class="row buttons">
+        <button id="undoBtn">Undo point</button>
+        <button id="clearBtn">Clear</button>
+      </div>
+      <p id="routeInfo" class="status">No route yet.</p>
+    </section>
+
+    <section>
+      <h2>2. Scan Street View</h2>
+      <label class="row">Spacing between frames
+        <span><input type="number" id="spacing" value="15" min="5" max="200" step="5"> m</span>
+      </label>
+      <p id="sampleInfo" class="hint"></p>
+      <button id="scanBtn" class="primary" disabled>Scan route</button>
+      <progress id="scanProgress" value="0" max="1" hidden></progress>
+      <p id="scanInfo" class="status"></p>
+      <div id="yearChart"></div>
+    </section>
+
+    <section>
+      <h2>3. Pick a year</h2>
+      <label class="row">Year
+        <select id="yearSelect" disabled><option value="latest">Latest available</option></select>
+      </label>
+      <label class="row"><input type="checkbox" id="fallback" checked> Fill gaps with the nearest year</label>
+      <p id="frameInfo" class="status"></p>
+    </section>
+
+    <section>
+      <h2>4. Preview and save</h2>
+      <label class="row">Field of view
+        <span><input type="number" id="fov" value="90" min="20" max="120" step="5">°</span>
+      </label>
+      <div class="row buttons">
+        <button id="downloadBtn" class="primary" disabled>Save frames to output/</button>
+      </div>
+      <p id="downloadInfo" class="status"></p>
+    </section>
+  </aside>
+
+  <main>
+    <div id="map"></div>
+    <div id="viewer" hidden>
+      <img id="frameImg" alt="Street View frame">
+      <div class="viewer-bar">
+        <button id="playBtn">Play</button>
+        <input type="range" id="frameSlider" min="0" max="0" value="0">
+        <span id="frameLabel"></span>
+      </div>
+    </div>
+  </main>
+
+  <script src="/config.js"></script>
+  <script src="/app.js"></script>
+</body>
+</html>

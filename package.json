@@ -1,0 +1,12 @@
+{
+  "name": "city-drive",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Plot a drive on a map and pull Street View imagery (including historic years) along it.",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}
