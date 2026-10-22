@@ -18,7 +18,10 @@
 #   ZONE           optional, overrides the pick
 #   MACHINE_TYPE   default g4-standard-48 (1x RTX PRO 6000 96 GB, 48 vCPU, 180 GB RAM)
 #   VIDEO_BUCKET   default <PROJECT_ID>-city-drive-video
-#   DISK_SIZE_GB   default 300 (models are ~40 GB; ComfyUI + PyTorch another ~15 GB)
+#   MODELS_BUCKET  default <PROJECT_ID>-city-drive-models. Model weights; every boot mirrors
+#                  it onto the VM's disk (worker/vm-startup.sh step 4). Applied on 'up'.
+#   DISK_SIZE_GB   default 300. Must hold everything in MODELS_BUCKET (H3 ~38 GB, Wan 2.2
+#                  ~37 GB more) plus ~15 GB for ComfyUI + PyTorch.
 #   DISK_TYPE      default hyperdisk-balanced (G4 VMs only take Hyperdisk)
 #   IMAGE_PROJECT / IMAGE_FAMILY  boot image. Default: the first family in IMAGE_CANDIDATES
 #                  below that exists, preferring images with the NVIDIA driver preinstalled.
@@ -35,6 +38,7 @@ PROJECT_ID="${PROJECT_ID:?Set PROJECT_ID}"
 REGION="${REGION:-us-central1}"
 MACHINE_TYPE="${MACHINE_TYPE:-g4-standard-48}"
 VIDEO_BUCKET="${VIDEO_BUCKET:-${PROJECT_ID}-city-drive-video}"
+MODELS_BUCKET="${MODELS_BUCKET:-${PROJECT_ID}-city-drive-models}"
 DISK_SIZE_GB="${DISK_SIZE_GB:-300}"
 DISK_TYPE="${DISK_TYPE:-hyperdisk-balanced}"
 IDLE_SHUTDOWN_MINUTES="${IDLE_SHUTDOWN_MINUTES:-10}"
@@ -43,6 +47,7 @@ TAG=city-drive-gpu
 COMFY_FIREWALL=city-drive-comfyui
 TUNNEL_PORT="${TUNNEL_PORT:-8188}"
 WORKER_SA="city-drive-gpu-worker@${PROJECT_ID}.iam.gserviceaccount.com"
+METADATA="video-bucket=$VIDEO_BUCKET,models-bucket=$MODELS_BUCKET,idle-shutdown-minutes=$IDLE_SHUTDOWN_MINUTES"
 
 # project/family pairs, best first. Images with the driver already installed come first:
 # building it with DKMS on the stock Ubuntu 24.04 image fails on its newer kernels.
@@ -86,11 +91,12 @@ if [[ -z "${ZONE:-}" ]]; then
   [[ -n "$ZONE" ]] || { echo "No zone in $REGION offers $MACHINE_TYPE. Set REGION or ZONE." >&2; exit 1; }
 fi
 
-# Both come from scripts/gcp-setup.sh; say so instead of failing deep inside gcloud.
+# All three come from scripts/gcp-setup.sh; say so instead of failing deep inside gcloud.
 preflight() {
   if ! gcloud storage buckets describe "gs://$VIDEO_BUCKET" --project="$PROJECT_ID" >/dev/null 2>&1 \
+    || ! gcloud storage buckets describe "gs://$MODELS_BUCKET" --project="$PROJECT_ID" >/dev/null 2>&1 \
     || ! gc iam service-accounts describe "$WORKER_SA" >/dev/null 2>&1; then
-    echo "gs://$VIDEO_BUCKET or the city-drive-gpu-worker service account doesn't exist yet." >&2
+    echo "gs://$VIDEO_BUCKET, gs://$MODELS_BUCKET or the city-drive-gpu-worker service account doesn't exist yet." >&2
     echo "Run the setup script (safe to re-run) first: PROJECT_ID=$PROJECT_ID ./scripts/gcp-setup.sh" >&2
     exit 1
   fi
@@ -134,20 +140,21 @@ case "$CMD" in
         --image-family="$IMAGE_FAMILY" --image-project="$IMAGE_PROJECT" \
         --boot-disk-size="${DISK_SIZE_GB}GB" --boot-disk-type="$DISK_TYPE" \
         --service-account="$WORKER_SA" --scopes=cloud-platform \
-        --metadata="video-bucket=$VIDEO_BUCKET,idle-shutdown-minutes=$IDLE_SHUTDOWN_MINUTES,install-nvidia-driver=True" \
+        --metadata="$METADATA,install-nvidia-driver=True" \
         --metadata-from-file=startup-script=worker/vm-startup.sh
-      echo "First boot sets up the driver, ComfyUI and ~40 GB of models: allow 20-30 minutes."
+      echo "First boot sets up the driver, ComfyUI and ~40 GB of models: allow 20-30 minutes"
+      echo "(less once gs://$MODELS_BUCKET is seeded, since models then come from GCS)."
     elif [[ "$status" != "RUNNING" ]]; then
       log "Starting $VM ($status)"
       gc compute instances add-tags "$VM" --zone="$ZONE" --tags="$TAG" # VMs created before the ComfyUI firewall rule
       gc compute instances add-metadata "$VM" --zone="$ZONE" \
-        --metadata="video-bucket=$VIDEO_BUCKET,idle-shutdown-minutes=$IDLE_SHUTDOWN_MINUTES" --metadata-from-file=startup-script=worker/vm-startup.sh
+        --metadata="$METADATA" --metadata-from-file=startup-script=worker/vm-startup.sh
       gc compute instances start "$VM" --zone="$ZONE"
     else
       log "$VM is already running; updating its startup script and re-running it"
       gc compute instances add-tags "$VM" --zone="$ZONE" --tags="$TAG"
       gc compute instances add-metadata "$VM" --zone="$ZONE" \
-        --metadata="video-bucket=$VIDEO_BUCKET,idle-shutdown-minutes=$IDLE_SHUTDOWN_MINUTES" --metadata-from-file=startup-script=worker/vm-startup.sh
+        --metadata="$METADATA" --metadata-from-file=startup-script=worker/vm-startup.sh
       gc compute ssh "$VM" --zone="$ZONE" --command='sudo google_metadata_script_runner startup'
     fi
     echo "Follow progress: PROJECT_ID=$PROJECT_ID ./scripts/gpu-vm.sh logs"

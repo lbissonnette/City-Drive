@@ -153,8 +153,13 @@ What `prompts.js` follows from the guide:
 
 ### Adding another model
 
-1. Get its files onto the VM (add `fetch` lines to `vm-startup.sh`) and build its
-   first+last-frame workflow in the ComfyUI UI.
+1. Upload its files to the models bucket in ComfyUI's layout, e.g.
+   `gcloud storage cp my_lora.safetensors gs://<PROJECT_ID>-city-drive-models/models/loras/`.
+   The next boot (or `gpu-vm.sh up` on a running VM) copies them to the VM. The copy
+   never overwrites a file the VM already has, so a changed model needs a new filename.
+   If a fresh project should get the model without anyone uploading it, also add it to
+   `MODELS` in `vm-startup.sh` with its download URL. Then build its first+last-frame
+   workflow in the ComfyUI UI.
 2. **Export (API)** it to JSON and replace the values the worker should fill with
    these placeholder strings: `{{FIRST_IMAGE}}`, `{{LAST_IMAGE}}` (the two `LoadImage`
    nodes), `{{PROMPT}}`, `{{NEGATIVE_PROMPT}}`, `{{WIDTH}}`, `{{HEIGHT}}`, `{{FRAMES}}`,
@@ -177,7 +182,8 @@ with `node scripts/workflow-ui.mjs <comfy-url> worker/workflows/<name>.json`.
 ## Running it
 
 Once per project, `scripts/gcp-setup.sh` (see [DEPLOY.md](../DEPLOY.md)) creates the
-bucket, gives the app and the `city-drive-gpu-worker` service account access to it,
+video and models buckets (re-run it if you set up before the models bucket existed),
+gives the app and the `city-drive-gpu-worker` service account access to them,
 and sets the `GCP_VIDEO_BUCKET` repo variable so the deployed app shows the video step.
 
 You'll most likely also need **GPU quota**: new projects usually have 0 spot RTX PRO
@@ -197,9 +203,18 @@ first family in its `IMAGE_CANDIDATES` list that exists (Deep Learning VM, then 
 accelerator images), and falls back to plain Ubuntu 22.04 with Google's driver
 installer. Building the driver on the stock Ubuntu 24.04 image fails on its newer
 kernels. Override with `IMAGE_PROJECT` + `IMAGE_FAMILY`. The first boot then installs
-ComfyUI (Python 3.12 via uv, CUDA 13 PyTorch, or 12.8 on a pre-580 driver) and ~38 GB
-of MiniMax H3 weights from Hugging Face. Allow 20–30 minutes. Later boots reuse the disk and start in a couple
-of minutes. When Google reclaims the spot VM it is **stopped**, not deleted; run `up`
+ComfyUI (pinned to v0.37.0, Python 3.12 via uv, PyTorch 2.14 for CUDA 13, or the latest
+12.8 build on a pre-580 driver) and ~38 GB of MiniMax H3 weights. Allow 20–30 minutes.
+Later boots reuse the disk and start in a couple of minutes.
+
+The weights come from the **models bucket**, `gs://<PROJECT_ID>-city-drive-models/models/`,
+in ComfyUI's own layout (`diffusion_models/`, `text_encoders/`, `vae/`, `loras/`). Every
+boot copies anything new in it to the VM's disk. The very first boot in a project finds
+the bucket empty: it downloads each file `vm-startup.sh` lists from Hugging Face and
+uploads it, or uploads the copy already on disk if the VM had downloaded it before the
+bucket existed. After that, Hugging Face is out of the loop: the same files stay in use
+until you change the bucket, and a recreated VM pulls them from same-region GCS.
+Everything in the bucket is copied, so `DISK_SIZE_GB` has to hold all of it. When Google reclaims the spot VM it is **stopped**, not deleted; run `up`
 again to bring it back.
 
 The VM costs money while it runs, so it **stops itself when idle**: once no job has
