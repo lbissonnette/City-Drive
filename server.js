@@ -365,13 +365,34 @@ async function videoStatus(id) {
   return { id, ...status, videoUrl: status.state === 'done' ? `/api/video/${id}/drive.mp4` : null };
 }
 
+// Cloud Run caps an HTTP/1 response with a Content-Length at 32 MiB, and a
+// stitched drive is often bigger, so each Range response is at most this
+// much; the browser asks for the next piece as it plays or seeks.
+const VIDEO_CHUNK_BYTES = 8 * 1024 * 1024;
+
 // Proxies the finished video from the (private) bucket, passing Range through
-// so the browser can seek.
+// (clamped to VIDEO_CHUNK_BYTES) so the browser can seek.
 async function streamVideo(req, res, id) {
   if (!VIDEO_BUCKET) throw httpError(503, 'Video is not set up: VIDEO_BUCKET is empty');
-  const upstream = await gcs.download(VIDEO_BUCKET, `jobs/${id}/drive.mp4`, req.headers.range);
+  let range = req.headers.range;
+  const m = range && range.match(/^bytes=(\d+)-(\d*)$/);
+  if (m) {
+    const start = Number(m[1]);
+    const end = m[2] ? Math.min(Number(m[2]), start + VIDEO_CHUNK_BYTES - 1) : start + VIDEO_CHUNK_BYTES - 1;
+    range = `bytes=${start}-${end}`;
+  }
+  let upstream;
+  try {
+    upstream = await gcs.download(VIDEO_BUCKET, `jobs/${id}/drive.mp4`, range);
+  } catch (err) {
+    if (err.status === 416) return send(res, 416, 'Range not satisfiable');
+    throw err;
+  }
   const headers = { 'Content-Type': 'video/mp4', 'Accept-Ranges': 'bytes' };
-  for (const h of ['content-length', 'content-range']) {
+  // A whole-file (non-Range) response goes out chunked, with no Content-Length,
+  // which Cloud Run streams without the size cap.
+  const pass = upstream.status === 206 ? ['content-length', 'content-range'] : [];
+  for (const h of pass) {
     if (upstream.headers.get(h)) headers[h] = upstream.headers.get(h);
   }
   res.writeHead(upstream.status, headers);
