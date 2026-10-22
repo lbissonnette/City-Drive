@@ -4,7 +4,8 @@ FROM node:22-slim
 ENV NODE_ENV=production
 WORKDIR /app
 
-COPY package.json server.js gcs.js prompts.js ./
+# Every server module at the root (server.js requires them), so a new one can't be missed.
+COPY package.json *.js ./
 COPY public ./public
 
 # server.js saves frames to ./output, so the runtime user needs to own /app.

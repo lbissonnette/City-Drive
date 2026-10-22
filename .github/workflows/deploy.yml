@@ -41,6 +41,11 @@ jobs:
         run: |
           gcloud auth configure-docker "${REGION}-docker.pkg.dev" --quiet
           docker build -t "$IMAGE" .
+          # Smoke test: catch a container that crashes on start before Cloud Run does.
+          docker run -d --name smoke -p 8080:8080 -e PORT=8080 -e GOOGLE_MAPS_API_KEY=smoke-test "$IMAGE"
+          for i in $(seq 1 15); do curl -fsS -o /dev/null http://localhost:8080/ && break; sleep 1; done
+          curl -fsS -o /dev/null http://localhost:8080/ || { docker logs smoke; exit 1; }
+          docker rm -f smoke
           docker push "$IMAGE"
 
       - id: deploy
