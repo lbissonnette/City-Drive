@@ -111,7 +111,8 @@ const server = http.createServer(async (req, res) => {
     if (req.method === 'POST' && cancelMatch) return sendJson(res, 200, await cancelVideo(cancelMatch[1]));
     const videoMatch = url.pathname.match(/^\/api\/video\/([\w-]+)(\/drive\.mp4)?$/);
     if (req.method === 'GET' && videoMatch) {
-      return videoMatch[2] ? streamVideo(req, res, videoMatch[1]) : sendJson(res, 200, await videoStatus(videoMatch[1]));
+      if (videoMatch[2]) return streamVideo(req, res, videoMatch[1], url.searchParams.has('download'));
+      return sendJson(res, 200, await videoStatus(videoMatch[1]));
     }
     if (req.method === 'GET' && url.pathname.startsWith('/output/')) {
       return serveFile(res, OUTPUT_DIR, url.pathname.slice('/output/'.length));
@@ -382,10 +383,11 @@ async function videoStatus(id) {
 const VIDEO_CHUNK_BYTES = 8 * 1024 * 1024;
 
 // Proxies the finished video from the (private) bucket, passing Range through
-// (clamped to VIDEO_CHUNK_BYTES) so the browser can seek.
-async function streamVideo(req, res, id) {
+// (clamped to VIDEO_CHUNK_BYTES) so the browser can seek. ?download makes it a
+// whole-file attachment, which works even when the browser can't play the encoding.
+async function streamVideo(req, res, id, download) {
   if (!VIDEO_BUCKET) throw httpError(503, 'Video is not set up: VIDEO_BUCKET is empty');
-  let range = req.headers.range;
+  let range = download ? undefined : req.headers.range;
   const m = range && range.match(/^bytes=(\d+)-(\d*)$/);
   if (m) {
     const start = Number(m[1]);
@@ -400,6 +402,7 @@ async function streamVideo(req, res, id) {
     throw err;
   }
   const headers = { 'Content-Type': 'video/mp4', 'Accept-Ranges': 'bytes' };
+  if (download) headers['Content-Disposition'] = `attachment; filename="city-drive-${id}.mp4"`;
   // A whole-file (non-Range) response goes out chunked, with no Content-Length,
   // which Cloud Run streams without the size cap.
   const pass = upstream.status === 206 ? ['content-length', 'content-range'] : [];
