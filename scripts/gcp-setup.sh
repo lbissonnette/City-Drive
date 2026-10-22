@@ -7,8 +7,9 @@
 #   - city-drive-deployer SA (used by GitHub Actions) and city-drive-runtime SA (runs the app)
 #   - Workload Identity Federation pool/provider that only trusts this GitHub repo
 #   - a Google Maps API key stored in Secret Manager as google-maps-api-key
-#   - the video bucket shared by the app and the GPU worker, and the
-#     city-drive-gpu-worker SA the GPU VM runs as (see scripts/gpu-vm.sh)
+#   - the video bucket shared by the app and the GPU worker, the models bucket
+#     the GPU VM mirrors its weights from, and the city-drive-gpu-worker SA the
+#     VM runs as (see scripts/gpu-vm.sh)
 #   - a cityDriveGpuControl role that lets the app start and stop that VM
 # Then prints the GitHub repository variables to add (or sets them with `gh` if it can).
 #
@@ -36,6 +37,7 @@ GITHUB_REPO="${GITHUB_REPO:-lbissonnette/City-Drive}"
 BILLING_ACCOUNT="${BILLING_ACCOUNT:-}"
 MAPS_API_KEY="${MAPS_API_KEY:-}"
 VIDEO_BUCKET="${VIDEO_BUCKET:-${PROJECT_ID}-city-drive-video}"
+MODELS_BUCKET="${MODELS_BUCKET:-${PROJECT_ID}-city-drive-models}"
 
 SERVICE=city-drive
 AR_REPO=city-drive
@@ -183,6 +185,21 @@ for sa in "$RUNTIME_SA" "$WORKER_SA"; do
     --member="serviceAccount:$sa" --role=roles/storage.objectAdmin >/dev/null
   echo "roles/storage.objectAdmin for ${sa%%@*}"
 done
+
+# --- Models bucket (ComfyUI weights as models/<folder>/<file>) -------------------
+# Same region as the VM, so mirroring it costs no egress. Only the worker uses it,
+# with write access because its first boot seeds missing files from Hugging Face.
+log "Bucket gs://$MODELS_BUCKET"
+if gcloud storage buckets describe "gs://$MODELS_BUCKET" --project="$PROJECT_ID" >/dev/null 2>&1; then
+  echo "Exists."
+else
+  gcloud storage buckets create "gs://$MODELS_BUCKET" --project="$PROJECT_ID" --location="$REGION" \
+    --uniform-bucket-level-access --public-access-prevention
+fi
+gcloud storage buckets add-iam-policy-binding "gs://$MODELS_BUCKET" --project="$PROJECT_ID" \
+  --member="serviceAccount:$WORKER_SA" --role=roles/storage.objectAdmin >/dev/null
+echo "roles/storage.objectAdmin for $WORKER_SA_NAME"
+
 gc projects add-iam-policy-binding "$PROJECT_ID" \
   --member="serviceAccount:$WORKER_SA" --role=roles/logging.logWriter --condition=None >/dev/null
 

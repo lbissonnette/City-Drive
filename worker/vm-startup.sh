@@ -2,12 +2,14 @@
 # Startup script for the City Drive GPU worker VM (Ubuntu, G4 / RTX PRO 6000).
 # scripts/gpu-vm.sh passes it as the VM's startup-script, so it runs as root on
 # every boot. Each step skips work that's already done, so after the first boot
-# (driver install, ~38 GB of model downloads) a restart just starts the services.
+# (driver install, ComfyUI, ~38 GB of models) a restart syncs any new models from
+# the models bucket and starts the services.
 #
 # Reads instance metadata:
 #   video-bucket            the bucket shared with the app (worker code lives in gs://<bucket>/worker/)
+#   models-bucket           model weights, mirrored into ComfyUI's models folder (see step 4)
 #   idle-shutdown-minutes   power off after this long with no jobs (default 10, 0 = never)
-#   install-wan             "true" to also download Wan 2.2 for the wan22_* workflows
+#   install-wan             "true" to also seed Wan 2.2 for the wan22_* workflows
 #
 # Log: /var/log/city-drive-startup.log (also in the serial console).
 
@@ -58,10 +60,20 @@ if [[ ! -f "$STATE/packages-done" ]]; then
 fi
 
 # --- 3. ComfyUI ---------------------------------------------------------------------
+# Pinned to the versions AI Worlds runs H3 with on the same GPU (its
+# comfyui_cloud/Dockerfile.rtx), so a boot never picks up an untested ComfyUI or
+# PyTorch. Bumping either reinstalls the venv on the next boot.
+COMFYUI_VERSION=v0.37.0
+TORCH_PINS=(torch==2.14.0 torchvision==0.29.0 torchaudio==2.11.0)
 if [[ ! -d "$COMFY/.git" ]]; then
-  git clone https://github.com/comfyanonymous/ComfyUI.git "$COMFY"
+  git clone --depth 1 --branch "$COMFYUI_VERSION" https://github.com/comfyanonymous/ComfyUI.git "$COMFY"
+elif [[ "$(git -C "$COMFY" describe --tags --exact-match 2>/dev/null)" != "$COMFYUI_VERSION" ]]; then
+  # VMs from before the pin cloned HEAD.
+  git -C "$COMFY" fetch --depth 1 origin "refs/tags/$COMFYUI_VERSION:refs/tags/$COMFYUI_VERSION"
+  git -C "$COMFY" checkout -q "$COMFYUI_VERSION"
 fi
-if [[ ! -f "$STATE/comfy-deps-done" ]]; then
+DEPS_DONE="$STATE/comfy-deps-$COMFYUI_VERSION-${TORCH_PINS[0]}"
+if [[ ! -f "$DEPS_DONE" ]]; then
   # uv gives the same Python 3.12 whichever Ubuntu release the image is on.
   command -v uv >/dev/null || curl -LsSf https://astral.sh/uv/install.sh | env UV_INSTALL_DIR=/usr/local/bin sh
   export UV_PYTHON_INSTALL_DIR=/opt/uv-python HOME="${HOME:-/root}"
@@ -69,50 +81,88 @@ if [[ ! -f "$STATE/comfy-deps-done" ]]; then
   uv venv --python 3.12 --seed "$COMFY/venv"
   pip() { uv pip install --python "$COMFY/venv/bin/python" "$@"; }
   # ComfyUI wants a cu130 PyTorch on RTX 20-series and newer, which needs driver 580+.
+  # The pins are for cu130; the cu128 fallback for older drivers takes the latest build.
   driver_major="$(nvidia-smi --query-gpu=driver_version --format=csv,noheader | head -n1 | cut -d. -f1)"
-  cuda=cu130; (( driver_major >= 580 )) || cuda=cu128
-  pip torch torchvision torchaudio --index-url "https://download.pytorch.org/whl/$cuda" --extra-index-url https://pypi.org/simple --index-strategy unsafe-best-match
+  if (( driver_major >= 580 )); then
+    pip "${TORCH_PINS[@]}" --index-url https://download.pytorch.org/whl/cu130 --extra-index-url https://pypi.org/simple --index-strategy unsafe-best-match
+  else
+    pip torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu128 --extra-index-url https://pypi.org/simple --index-strategy unsafe-best-match
+  fi
   pip -r "$COMFY/requirements.txt"
   # The worker shares this venv.
   pip google-cloud-storage requests
-  touch "$STATE/comfy-deps-done"
+  rm -f "$STATE"/comfy-deps-*
+  touch "$DEPS_DONE"
 fi
+
+command -v gcloud >/dev/null || snap install google-cloud-cli --classic
 
 # --- 4. Models ----------------------------------------------------------------------
-fetch() { # fetch <url> <dest>; resumable, skipped once present
-  local url="$1" dest="$2"
-  [[ -s "$dest" ]] && return 0
-  mkdir -p "$(dirname "$dest")"
-  curl -fL --retry 5 --retry-delay 10 -C - -o "$dest.part" "$url"
-  mv "$dest.part" "$dest"
-}
+# The models bucket is the source of truth, in ComfyUI's own layout
+# (gs://<models-bucket>/models/<folder>/<file>). Every boot mirrors it into
+# $COMFY/models, so adding a model is an upload, and a recreated VM pulls from
+# same-region GCS instead of Hugging Face. The mirror never overwrites a file it
+# already has: to change a model, upload it under a new name and point the
+# workflow at that.
+#
+# MODELS lists what the bundled workflows need. Any the bucket lacks is seeded
+# once, from a copy already on this disk or else from its Hugging Face URL, so the
+# bucket only depends on Hugging Face the first time.
 M="$COMFY/models"
-
-# MiniMax H3 first+last frame to video (the default). Files and URLs are the ones
-# ComfyUI's own video_minimax_h3_i2v template uses (~38 GB).
 H3=https://huggingface.co/Comfy-Org/MiniMax-H3/resolve/main
-fetch "$H3/diffusion_models/minimax_h3_fl2va_pruned_int8_convrot.safetensors" "$M/diffusion_models/minimax_h3_fl2va_pruned_int8_convrot.safetensors"
-fetch "$H3/text_encoders/qwen3vl_32b_minimax_h3_nvfp4_awq.safetensors"        "$M/text_encoders/qwen3vl_32b_minimax_h3_nvfp4_awq.safetensors"
-fetch "$H3/vae/minimax_h3_video_vae_int8_convrot.safetensors"                 "$M/vae/minimax_h3_video_vae_int8_convrot.safetensors"
-# 8-step turbo LoRA used by the default minimax_h3_flf2v_turbo workflow.
-fetch "https://huggingface.co/lightx2v/Minimax-h3-Turbo/resolve/main/minimax_h3_fl2v_turbo_8step_v1.0_comfyui_bf16.safetensors" \
-  "$M/loras/minimax_h3_fl2v_turbo_8step_v1.0_comfyui_bf16.safetensors"
+WAN=https://huggingface.co/Comfy-Org/Wan_2.2_ComfyUI_Repackaged/resolve/main/split_files
+MODELS=( # <group> <folder/file> <url>
+  # MiniMax H3 first+last frame to video (the default). Files and URLs are the ones
+  # ComfyUI's own video_minimax_h3_i2v template uses (~38 GB).
+  "h3 diffusion_models/minimax_h3_fl2va_pruned_int8_convrot.safetensors $H3/diffusion_models/minimax_h3_fl2va_pruned_int8_convrot.safetensors"
+  "h3 text_encoders/qwen3vl_32b_minimax_h3_nvfp4_awq.safetensors $H3/text_encoders/qwen3vl_32b_minimax_h3_nvfp4_awq.safetensors"
+  "h3 vae/minimax_h3_video_vae_int8_convrot.safetensors $H3/vae/minimax_h3_video_vae_int8_convrot.safetensors"
+  # 8-step turbo LoRA used by the default minimax_h3_flf2v_turbo workflow.
+  "h3 loras/minimax_h3_fl2v_turbo_8step_v1.0_comfyui_bf16.safetensors https://huggingface.co/lightx2v/Minimax-h3-Turbo/resolve/main/minimax_h3_fl2v_turbo_8step_v1.0_comfyui_bf16.safetensors"
+  # Wan 2.2 14B (Apache 2.0) for the wan22_* workflows. Only seeded when the VM has
+  # metadata install-wan=true (~37 GB more).
+  "wan diffusion_models/wan2.2_i2v_high_noise_14B_fp8_scaled.safetensors $WAN/diffusion_models/wan2.2_i2v_high_noise_14B_fp8_scaled.safetensors"
+  "wan diffusion_models/wan2.2_i2v_low_noise_14B_fp8_scaled.safetensors $WAN/diffusion_models/wan2.2_i2v_low_noise_14B_fp8_scaled.safetensors"
+  "wan text_encoders/umt5_xxl_fp8_e4m3fn_scaled.safetensors $WAN/text_encoders/umt5_xxl_fp8_e4m3fn_scaled.safetensors"
+  "wan vae/wan_2.1_vae.safetensors $WAN/vae/wan_2.1_vae.safetensors"
+  # 4-step distillation LoRAs used by the default "fast" workflow.
+  "wan loras/wan2.2_i2v_lightx2v_4steps_lora_v1_high_noise.safetensors $WAN/loras/wan2.2_i2v_lightx2v_4steps_lora_v1_high_noise.safetensors"
+  "wan loras/wan2.2_i2v_lightx2v_4steps_lora_v1_low_noise.safetensors $WAN/loras/wan2.2_i2v_lightx2v_4steps_lora_v1_low_noise.safetensors"
+)
+ENABLED=(h3)
+if [[ "$(metadata install-wan)" == "true" ]]; then ENABLED+=(wan); fi
 
-# Wan 2.2 14B (Apache 2.0) for the wan22_* workflows. Off unless the VM has
-# metadata install-wan=true (~37 GB more).
-if [[ "$(metadata install-wan)" == "true" ]]; then
-HF=https://huggingface.co/Comfy-Org/Wan_2.2_ComfyUI_Repackaged/resolve/main/split_files
-fetch "$HF/diffusion_models/wan2.2_i2v_high_noise_14B_fp8_scaled.safetensors" "$M/diffusion_models/wan2.2_i2v_high_noise_14B_fp8_scaled.safetensors"
-fetch "$HF/diffusion_models/wan2.2_i2v_low_noise_14B_fp8_scaled.safetensors"  "$M/diffusion_models/wan2.2_i2v_low_noise_14B_fp8_scaled.safetensors"
-fetch "$HF/text_encoders/umt5_xxl_fp8_e4m3fn_scaled.safetensors"              "$M/text_encoders/umt5_xxl_fp8_e4m3fn_scaled.safetensors"
-fetch "$HF/vae/wan_2.1_vae.safetensors"                                       "$M/vae/wan_2.1_vae.safetensors"
-# 4-step distillation LoRAs used by the default "fast" workflow.
-fetch "$HF/loras/wan2.2_i2v_lightx2v_4steps_lora_v1_high_noise.safetensors"    "$M/loras/wan2.2_i2v_lightx2v_4steps_lora_v1_high_noise.safetensors"
-fetch "$HF/loras/wan2.2_i2v_lightx2v_4steps_lora_v1_low_noise.safetensors"     "$M/loras/wan2.2_i2v_lightx2v_4steps_lora_v1_low_noise.safetensors"
+MODELS_BUCKET="$(metadata models-bucket)"
+# VMs set up before the models bucket existed have no models-bucket metadata
+# until the next `gpu-vm.sh up`; they keep downloading straight to disk.
+[[ -n "$MODELS_BUCKET" ]] || echo "models-bucket metadata is not set; downloading models to disk only" >&2
+
+seed() { # seed <folder/file> <url>
+  local path="$1" url="$2" dest="$M/$1"
+  local obj="gs://$MODELS_BUCKET/models/$path"
+  [[ -n "$MODELS_BUCKET" ]] && gcloud storage objects describe "$obj" >/dev/null 2>&1 && return 0
+  if [[ ! -s "$dest" ]]; then
+    mkdir -p "$(dirname "$dest")"
+    curl -fL --retry 5 --retry-delay 10 -C - -o "$dest.part" "$url"
+    mv "$dest.part" "$dest"
+  fi
+  [[ -z "$MODELS_BUCKET" ]] || gcloud storage cp "$dest" "$obj"
+}
+for entry in "${MODELS[@]}"; do
+  read -r group path url <<<"$entry"
+  if [[ " ${ENABLED[*]} " == *" $group "* ]]; then seed "$path" "$url"; fi
+done
+if [[ -n "$MODELS_BUCKET" ]]; then
+  gcloud storage rsync --recursive --no-clobber "gs://$MODELS_BUCKET/models" "$M"
 fi
+for entry in "${MODELS[@]}"; do
+  read -r group path url <<<"$entry"
+  if [[ " ${ENABLED[*]} " == *" $group "* && ! -s "$M/$path" ]]; then
+    echo "Model $path is missing from $M after the sync" >&2; exit 1
+  fi
+done
 
 # --- 5. Worker code (pushed to the bucket by scripts/gpu-vm.sh) ------------------------
-command -v gcloud >/dev/null || snap install google-cloud-cli --classic
 mkdir -p "$WORKER"
 gcloud storage rsync --recursive --delete-unmatched-destination-objects "gs://$BUCKET/worker" "$WORKER"
 
