@@ -196,6 +196,7 @@ def run_workflow(workflow, out_path, ui_workflow=None, job=None):
 
     while True:
         time.sleep(3)
+        mark_active()  # a job in progress is never idle time, even if the worker restarts mid-job
         if job and cancel_requested(job):
             # Drop it if it's still waiting in ComfyUI's queue, stop it if it's running.
             requests.post(f"{COMFY_URL}/queue", json={"delete": [prompt_id]}, timeout=10)
@@ -334,6 +335,8 @@ def process(job):
 def main():
     WORK_DIR.mkdir(parents=True, exist_ok=True)
     idle_seconds()  # starts the idle clock if this is the first run since boot
+    if any(p.is_dir() for p in WORK_DIR.iterdir()):
+        mark_active()  # an interrupted job to resume: don't power off while ComfyUI starts
     wait_for_comfy()
     idle = f"shutting down after {IDLE_SHUTDOWN_MINUTES:g} idle minutes" if IDLE_SHUTDOWN_MINUTES > 0 \
         else "idle shutdown off"

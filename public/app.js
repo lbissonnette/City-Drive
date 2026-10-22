@@ -614,13 +614,20 @@ const GPU_LABELS = {
   REPAIRING: 'being repaired by Google Cloud',
   MISSING: 'not created yet (run scripts/gpu-vm.sh up)',
 };
+const STOP_REASON_LABELS = {
+  preempted: 'preempted by Google, spot capacity reclaimed',
+  idle: 'idle shutdown',
+  stopped: 'stopped by request',
+  'host-error': 'host error',
+};
 const GPU_SETTLED = ['RUNNING', 'TERMINATED', 'STOPPED', 'SUSPENDED', 'MISSING'];
 
 function showGpu(s) {
   state.gpu = s;
   const where = s.zone ? ` in ${s.zone}` : '';
   const label = GPU_LABELS[s.status] || s.status.toLowerCase();
-  setStatus('gpuStatus', `${label[0].toUpperCase()}${label.slice(1)}${s.status === 'MISSING' ? '' : where}`);
+  const why = STOP_REASON_LABELS[s.stopReason] ? ` (${STOP_REASON_LABELS[s.stopReason]}${s.stoppedAt ? ` ${new Date(s.stoppedAt).toLocaleTimeString()}` : ''})` : '';
+  setStatus('gpuStatus', `${label[0].toUpperCase()}${label.slice(1)}${s.status === 'MISSING' ? '' : where}${why}`);
   $('gpuDot').className = `dot${s.status === 'RUNNING' ? ' on' : GPU_SETTLED.includes(s.status) ? '' : ' busy'}`;
   showGpuCost();
   $('gpuStartBtn').disabled = !['TERMINATED', 'STOPPED', 'SUSPENDED'].includes(s.status);

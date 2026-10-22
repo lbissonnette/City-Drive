@@ -46,7 +46,35 @@ async function findZone() {
 
 const instanceUrl = async (z) => `${API}/projects/${await project()}/zones/${z}/instances/${VM_NAME}`;
 
-// { name, zone, status, internalIp, startedAt } where status is a GCE instance status
+// Why a stopped VM last stopped, from its zone's operations: 'preempted' (Google
+// reclaimed the spot VM), 'idle' (a shutdown from inside the VM, which is the
+// worker's idle timer), 'stopped' (a stop request from the app or gcloud),
+// 'host-error', or null if unknown. Needs compute.zoneOperations.list
+// (cityDriveGpuControl, from gcp-setup.sh); without it the reason is just unknown.
+const STOP_REASONS = {
+  'compute.instances.preempted': 'preempted',
+  'compute.instances.guestTerminate': 'idle',
+  stop: 'stopped',
+  'compute.instances.hostError': 'host-error',
+};
+
+let stopReasonWarned = false;
+
+async function stopReason(z, vm) {
+  try {
+    const filter = encodeURIComponent(`targetId = "${vm.id}"`);
+    const data = await request(`${API}/projects/${await project()}/zones/${z}/operations` +
+      `?filter=${filter}&orderBy=${encodeURIComponent('creationTimestamp desc')}&maxResults=20`);
+    const op = (data.items || []).find((o) => STOP_REASONS[o.operationType]);
+    return op ? { stopReason: STOP_REASONS[op.operationType], stoppedAt: op.insertTime || null } : {};
+  } catch (err) {
+    if (!stopReasonWarned) console.error(`GPU VM stop reason unavailable: ${err.message}`);
+    stopReasonWarned = true;
+    return {};
+  }
+}
+
+// { name, zone, status, internalIp, startedAt, stopReason?, stoppedAt? } where status is a GCE instance status
 // (RUNNING, TERMINATED = stopped, STAGING, STOPPING, ...) or MISSING if
 // gpu-vm.sh up hasn't created the VM yet. internalIp is the VM's VPC address,
 // which the /comfy/ proxy in server.js connects to. startedAt is when the
@@ -62,6 +90,7 @@ async function status() {
       status: vm.status,
       internalIp: vm.networkInterfaces?.[0]?.networkIP || null,
       startedAt: vm.status === 'RUNNING' ? vm.lastStartTimestamp || null : null,
+      ...(['TERMINATED', 'STOPPED'].includes(vm.status) ? await stopReason(z, vm) : {}),
     };
   } catch (err) {
     if (err.status !== 404) throw err;
