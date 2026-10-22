@@ -247,8 +247,15 @@ async function createVideoJob({ run, prompt, negativePrompt, stride = 1, maxClip
   const manifest = await gcs.readJson(VIDEO_BUCKET, `runs/${run}/manifest.json`);
   if (!manifest) throw httpError(404, `No frames in the bucket for run ${run}. Save frames again.`);
 
+  speedKmh = speedKmh == null || speedKmh === '' || params.frames ? null : Number(speedKmh);
+  if (speedKmh !== null && !(speedKmh > 0 && speedKmh <= MAX_SPEED_KMH)) {
+    throw httpError(400, `Speed must be between 1 and ${MAX_SPEED_KMH} km/h`);
+  }
   const saved = manifest.frames.filter((f) => f.ok);
-  const picked = timing.pickFrames(saved.length, stride, maxClips);
+  // In speed mode, frames closer together than the shortest clip covers are
+  // skipped; a clip for them would have to play slower than the chosen speed.
+  const minMeters = speedKmh ? (speedKmh / 3.6) * MIN_CLIP_SECONDS : 0;
+  const picked = timing.pickFrames(saved, { stride, maxClips, minMeters });
   const frames = picked.map((i) => saved[i]);
   const images = frames.map((f) => `runs/${run}/${f.file}`);
   if (images.length < 2) throw httpError(400, 'Need at least two saved frames to make a video');
@@ -262,10 +269,6 @@ async function createVideoJob({ run, prompt, negativePrompt, stride = 1, maxClip
   }
   const sourceSize = manifest.size || '640x640';
   const [width, height] = preset.canvas(...sourceSize.split('x').map(Number));
-  speedKmh = speedKmh == null || speedKmh === '' || params.frames ? null : Number(speedKmh);
-  if (speedKmh !== null && !(speedKmh > 0 && speedKmh <= MAX_SPEED_KMH)) {
-    throw httpError(400, `Speed must be between 1 and ${MAX_SPEED_KMH} km/h`);
-  }
   const fps = Number(params.fps) || preset.fps;
   const plan = timing.planClips({
     frames: saved, picked, preset: { fps, grid: preset.grid }, speedKmh, clipSeconds,
@@ -308,6 +311,7 @@ async function createVideoJob({ run, prompt, negativePrompt, stride = 1, maxClip
       width, height, frames: minFrames === maxFrames ? minFrames : `${minFrames}–${maxFrames}`, fps, sourceSize,
       ...(speedKmh && {
         speedKmh,
+        closeFramesSkipped: timing.pickFrames(saved, { stride }).length - timing.pickFrames(saved, { stride, minMeters }).length,
         clampedShort: plan.filter((c) => c.clamped === 'short').length,
         clampedLong: plan.filter((c) => c.clamped === 'long').length,
       }),
