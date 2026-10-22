@@ -74,6 +74,7 @@ window.initMap = function initMap() {
   $('videoBtn').onclick = makeVideo;
   $('gpuStartBtn').onclick = () => gpuAction('start');
   $('gpuStopBtn').onclick = () => gpuAction('stop');
+  $('gpuRefreshBtn').onclick = refreshGpu;
   const comfy = window.CITY_DRIVE_CONFIG?.comfy;
   if (comfy) {
     $('comfyBtn').hidden = false;
@@ -549,6 +550,13 @@ async function pollGpu() {
     setStatus('gpuStatus', `Status unavailable (${err.message})`, true);
   }
   state.gpuPoll = setTimeout(pollGpu, delay);
+}
+
+async function refreshGpu() {
+  $('gpuRefreshBtn').disabled = true;
+  setStatus('gpuStatus', 'Checking…');
+  await pollGpu();
+  $('gpuRefreshBtn').disabled = false;
 }
 
 async function gpuAction(action) {
