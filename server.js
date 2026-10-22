@@ -107,7 +107,8 @@ const server = http.createServer(async (req, res) => {
     if (req.method === 'POST' && cancelMatch) return sendJson(res, 200, await cancelVideo(cancelMatch[1]));
     const videoMatch = url.pathname.match(/^\/api\/video\/([\w-]+)(\/drive\.mp4)?$/);
     if (req.method === 'GET' && videoMatch) {
-      return videoMatch[2] ? streamVideo(req, res, videoMatch[1]) : sendJson(res, 200, await videoStatus(videoMatch[1]));
+      if (videoMatch[2]) return streamVideo(req, res, videoMatch[1], url.searchParams.has('download'));
+      return sendJson(res, 200, await videoStatus(videoMatch[1]));
     }
     if (req.method === 'GET' && url.pathname.startsWith('/output/')) {
       return serveFile(res, OUTPUT_DIR, url.pathname.slice('/output/'.length));
@@ -366,11 +367,13 @@ async function videoStatus(id) {
 }
 
 // Proxies the finished video from the (private) bucket, passing Range through
-// so the browser can seek.
-async function streamVideo(req, res, id) {
+// so the browser can seek. ?download makes it a file download, which works even
+// when the browser can't play the encoding.
+async function streamVideo(req, res, id, download) {
   if (!VIDEO_BUCKET) throw httpError(503, 'Video is not set up: VIDEO_BUCKET is empty');
   const upstream = await gcs.download(VIDEO_BUCKET, `jobs/${id}/drive.mp4`, req.headers.range);
   const headers = { 'Content-Type': 'video/mp4', 'Accept-Ranges': 'bytes' };
+  if (download) headers['Content-Disposition'] = `attachment; filename="city-drive-${id}.mp4"`;
   for (const h of ['content-length', 'content-range']) {
     if (upstream.headers.get(h)) headers[h] = upstream.headers.get(h);
   }

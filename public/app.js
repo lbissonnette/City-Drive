@@ -451,6 +451,7 @@ function updateVideoInfo() {
 async function makeVideo() {
   $('videoBtn').disabled = true;
   $('videoPlayer').hidden = true;
+  $('videoDownload').hidden = true;
   setStatus('videoStatus', 'Queueing…');
   try {
     const resp = await fetch('/api/video', {
@@ -487,6 +488,8 @@ async function pollVideo(id) {
     if (s.state === 'done' && !$('videoPlayer').src.endsWith(s.videoUrl)) {
       $('videoPlayer').src = s.videoUrl;
       $('videoPlayer').hidden = false;
+      $('videoDownload').href = `${s.videoUrl}?download`;
+      $('videoDownload').hidden = false;
     }
     if (s.state === 'done' || s.state === 'failed' || s.state === 'cancelled') {
       state.videoRunning = false;
@@ -527,10 +530,19 @@ async function loadRecentVideos() {
         };
         li.append(btn);
       }
+      if (v.videoUrl) {
+        const link = document.createElement('a');
+        link.textContent = 'Download';
+        link.className = 'download';
+        link.href = `${v.videoUrl}?download`;
+        link.onclick = (e) => e.stopPropagation();
+        li.append(link);
+      }
       li.onclick = () => {
         storageSet('cityDrive.lastVideoJob', v.id);
         $('videoPlayer').hidden = true;
         $('videoPlayer').removeAttribute('src');
+        $('videoDownload').hidden = true;
         pollVideo(v.id);
       };
       list.append(li);

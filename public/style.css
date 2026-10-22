@@ -30,6 +30,9 @@ textarea { width: 100%; font: inherit; margin: 4px 0; }
 .video-list .meta { color: #666; font-size: 12px; }
 .video-list .failed { color: #b00020; }
 .video-list li { position: relative; }
+a.download { display: inline-block; margin-top: 6px; color: #1a73e8; }
+a.download[hidden] { display: none; }
+.video-list a.download { position: absolute; top: 6px; right: 8px; margin: 0; font-size: 12px; }
 .video-list button.cancel { position: absolute; top: 6px; right: 6px; padding: 2px 8px; font-size: 12px; }
 #videoPlayer { width: 100%; margin-top: 8px; background: #000; }
 
