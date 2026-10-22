@@ -68,8 +68,27 @@ def claim_next_job():
             continue
         job_id = Path(marker.name).stem
         marker.delete()
-        return json.loads(bucket.blob(f"jobs/{job_id}/job.json").download_as_text())
+        job = json.loads(bucket.blob(f"jobs/{job_id}/job.json").download_as_text())
+        if cancel_requested(job, force=True):
+            set_status(job, "cancelled", finishedAt=now())
+            continue
+        return job
     return None
+
+
+class JobCancelled(Exception):
+    pass
+
+
+_cancel_checked = {}
+
+
+def cancel_requested(job, force=False):
+    """True once the app has written jobs/<id>/cancel.json (checked at most every 10 s)."""
+    if not force and time.time() - _cancel_checked.get(job["id"], 0) < 10:
+        return False
+    _cancel_checked[job["id"]] = time.time()
+    return bucket.blob(f"jobs/{job['id']}/cancel.json").exists()
 
 
 def set_status(job, state, **fields):
@@ -148,15 +167,23 @@ def fill_template(node, values):
     return node
 
 
-def run_workflow(workflow, out_path):
-    resp = requests.post(f"{COMFY_URL}/prompt",
-                         json={"prompt": workflow, "client_id": CLIENT_ID}, timeout=60)
+def run_workflow(workflow, out_path, ui_workflow=None, job=None):
+    body = {"prompt": workflow, "client_id": CLIENT_ID}
+    if ui_workflow:
+        # The editable graph: lets ComfyUI's queue/history open the run as a workflow tab.
+        body["extra_data"] = {"extra_pnginfo": {"workflow": ui_workflow}}
+    resp = requests.post(f"{COMFY_URL}/prompt", json=body, timeout=60)
     if resp.status_code != 200:
         raise RuntimeError(f"ComfyUI rejected the workflow: {resp.text[:2000]}")
     prompt_id = resp.json()["prompt_id"]
 
     while True:
         time.sleep(3)
+        if job and cancel_requested(job):
+            # Drop it if it's still waiting in ComfyUI's queue, stop it if it's running.
+            requests.post(f"{COMFY_URL}/queue", json={"delete": [prompt_id]}, timeout=10)
+            requests.post(f"{COMFY_URL}/interrupt", json={"prompt_id": prompt_id}, timeout=10)
+            raise JobCancelled()
         history = requests.get(f"{COMFY_URL}/history/{prompt_id}", timeout=30).json()
         entry = history.get(prompt_id)
         if not entry:
@@ -210,6 +237,9 @@ def process(job):
     (work / "frames").mkdir(parents=True, exist_ok=True)
     (work / "clips").mkdir(exist_ok=True)
     workflow_template = json.loads((WORKFLOW_DIR / f"{job['workflow']}.json").read_text())
+    # Optional UI-format twin (scripts/workflow-ui.mjs) with the same placeholders.
+    ui_path = WORKFLOW_DIR / f"{job['workflow']}.ui.json"
+    ui_template = json.loads(ui_path.read_text()) if ui_path.exists() else None
     total = len(job["segments"])
     log(f"Job {job_id}: {total} clips from run {job['run']} with {job['workflow']}")
 
@@ -222,9 +252,11 @@ def process(job):
 
     clips = []
     for seg in job["segments"]:
+        if cancel_requested(job, force=True):
+            raise JobCancelled()
         set_status(job, "running", step="generating clips", clipsDone=seg["index"])
         started = time.time()
-        workflow = fill_template(workflow_template, {
+        values = {
             "PROMPT": seg.get("prompt", job["prompt"]),
             "NEGATIVE_PROMPT": job.get("negativePrompt", ""),
             "FIRST_IMAGE": comfy_names[seg["first"]],
@@ -235,9 +267,10 @@ def process(job):
             "FPS": params["fps"],
             "SEED": params["seed"] + seg["index"],
             "OUTPUT_PREFIX": f"city-drive/{job_id}/clip_{seg['index']:04d}",
-        })
+        }
+        ui_workflow = fill_template(ui_template, values) if ui_template else None
         clip = work / "clips" / f"clip_{seg['index']:04d}.mp4"
-        run_workflow(workflow, clip)
+        run_workflow(fill_template(workflow_template, values), clip, ui_workflow, job)
         clips.append(clip)
         log(f"Job {job_id}: clip {seg['index'] + 1}/{total} in {time.time() - started:.0f}s")
 
@@ -268,6 +301,10 @@ def main():
         mark_active()
         try:
             process(job)
+        except JobCancelled:
+            log(f"Job {job['id']} cancelled")
+            set_status(job, "cancelled", finishedAt=now())
+            shutil.rmtree(WORK_DIR / job["id"], ignore_errors=True)
         except Exception as err:  # v1: report and move on to the next job
             log(f"Job {job['id']} failed: {err}")
             set_status(job, "failed", error=str(err)[:1000], finishedAt=now())

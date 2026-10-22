@@ -72,6 +72,13 @@ window.initMap = function initMap() {
   if (cfg.maxClipSeconds) $('videoClipSeconds').max = cfg.maxClipSeconds;
   $('videoClipSeconds').oninput = updateVideoInfo;
   $('videoBtn').onclick = makeVideo;
+  $('videosRefreshBtn').onclick = loadRecentVideos;
+  if (window.CITY_DRIVE_CONFIG?.videoEnabled) {
+    loadRecentVideos();
+    // Pick up where the last visit left off.
+    const last = storageGet('cityDrive.lastVideoJob');
+    if (last) pollVideo(last);
+  }
   $('gpuStartBtn').onclick = () => gpuAction('start');
   $('gpuStopBtn').onclick = () => gpuAction('stop');
   $('gpuRefreshBtn').onclick = refreshGpu;
@@ -456,6 +463,8 @@ async function makeVideo() {
     const data = await resp.json();
     if (!resp.ok) throw new Error(data.error);
     state.videoRunning = true;
+    storageSet('cityDrive.lastVideoJob', data.id);
+    loadRecentVideos();
     if (data.vm?.error) setStatus('gpuStatus', `Could not start it (${data.vm.error})`, true);
     pollVideo(data.id);
     pollGpu();
@@ -467,25 +476,100 @@ async function makeVideo() {
 
 async function pollVideo(id) {
   clearTimeout(state.videoPoll);
+  state.videoJob = id;
+  markSelectedVideo();
   try {
     const resp = await fetch(`/api/video/${id}`);
     const s = await resp.json();
     if (!resp.ok) throw new Error(s.error);
     const progress = s.state === 'running' ? ` (${s.step || 'clips'}: ${s.clipsDone}/${s.clipsTotal})` : '';
     setStatus('videoStatus', `Job ${id}: ${s.state}${progress}${s.error ? ` – ${s.error}` : ''}`, s.state === 'failed');
-    if (s.state === 'done') {
+    if (s.state === 'done' && !$('videoPlayer').src.endsWith(s.videoUrl)) {
       $('videoPlayer').src = s.videoUrl;
       $('videoPlayer').hidden = false;
     }
-    if (s.state === 'done' || s.state === 'failed') {
-      $('videoBtn').disabled = false;
+    if (s.state === 'done' || s.state === 'failed' || s.state === 'cancelled') {
       state.videoRunning = false;
+      updateVideoInfo();
+      loadRecentVideos();
       return;
     }
   } catch (err) {
     setStatus('videoStatus', `Job ${id}: status check failed (${err.message}), retrying`, true);
   }
   state.videoPoll = setTimeout(() => pollVideo(id), 10000);
+}
+
+async function loadRecentVideos() {
+  try {
+    const resp = await fetch('/api/videos');
+    const data = await resp.json();
+    if (!resp.ok) throw new Error(data.error);
+    const list = $('videoList');
+    list.innerHTML = '';
+    if (!data.videos.length) list.innerHTML = '<li class="meta">No videos yet.</li>';
+    for (const v of data.videos) {
+      const li = document.createElement('li');
+      li.dataset.id = v.id;
+      const when = v.createdAt ? new Date(v.createdAt).toLocaleString() : v.id;
+      const progress = v.state === 'running' ? ` ${v.clipsDone || 0}/${v.clips} clips` : '';
+      const shown = v.cancelRequested && v.state === 'running' ? 'cancelling' : v.state;
+      li.innerHTML = `<div>${escapeHtml(when)} · ${escapeHtml(v.label || v.run || '')}</div>` +
+        `<div class="meta ${v.state === 'failed' ? 'failed' : ''}">${escapeHtml(shown)}${progress} · ` +
+        `${v.clips} clips, ~${v.seconds} s</div>`;
+      if ((v.state === 'queued' || v.state === 'running') && !v.cancelRequested) {
+        const btn = document.createElement('button');
+        btn.textContent = 'Cancel';
+        btn.className = 'cancel';
+        btn.onclick = (e) => {
+          e.stopPropagation();
+          cancelVideo(v);
+        };
+        li.append(btn);
+      }
+      li.onclick = () => {
+        storageSet('cityDrive.lastVideoJob', v.id);
+        $('videoPlayer').hidden = true;
+        $('videoPlayer').removeAttribute('src');
+        pollVideo(v.id);
+      };
+      list.append(li);
+    }
+    markSelectedVideo();
+  } catch (err) {
+    $('videoList').innerHTML = `<li class="meta failed">Could not list videos: ${escapeHtml(err.message)}</li>`;
+  }
+}
+
+async function cancelVideo(v) {
+  const what = v.state === 'running' ? 'Stop this video mid-way? Clips made so far are discarded.' : 'Remove this video from the queue?';
+  if (!confirm(what)) return;
+  try {
+    const resp = await fetch(`/api/video/${v.id}/cancel`, { method: 'POST' });
+    const data = await resp.json();
+    if (!resp.ok) throw new Error(data.error);
+  } catch (err) {
+    alert(`Could not cancel: ${err.message}`);
+  }
+  loadRecentVideos();
+  if (state.videoJob === v.id) pollVideo(v.id);
+}
+
+function markSelectedVideo() {
+  for (const li of $('videoList').children) li.classList.toggle('selected', li.dataset.id === state.videoJob);
+}
+
+function escapeHtml(s) {
+  return String(s).replace(/[&<>"']/g, (c) => `&#${c.charCodeAt(0)};`);
+}
+
+// localStorage can be unavailable (private windows, blocked storage); it's only a convenience.
+function storageGet(key) {
+  try { return localStorage.getItem(key); } catch { return null; }
+}
+
+function storageSet(key, value) {
+  try { localStorage.setItem(key, value); } catch { /* ignore */ }
 }
 
 // ---------- GPU worker VM ----------
