@@ -73,6 +73,9 @@
       <label for="videoPrompt">Describe the drive</label>
       <p class="hint">Goes into each clip's prompt in MiniMax H3's own format, along with the timing and any turn between the two frames. Paste a full H3 prompt to use it as is.</p>
       <textarea id="videoPrompt" rows="3"></textarea>
+      <label class="row">Quality
+        <select id="videoWorkflow"></select>
+      </label>
       <label class="row">Use every Nth frame
         <input type="number" id="videoStride" value="1" min="1" max="50">
       </label>
@@ -82,6 +85,7 @@
       <p id="videoInfo" class="hint"></p>
       <button id="videoBtn" class="primary" disabled>Make video</button>
       <p id="videoStatus" class="status"></p>
+      <p id="videoSettings" class="hint"></p>
       <video id="videoPlayer" controls hidden></video>
     </section>
   </aside>

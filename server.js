@@ -36,17 +36,19 @@ const VIDEO_BUCKET = process.env.VIDEO_BUCKET || '';
 // grid [step, offset] is the frame counts the model accepts (step * k + offset).
 const WORKFLOWS = {
   // MiniMax H3: 24 fps, frame counts on a 17k+5 grid (124 = ~5.2 s), 768 px short edge.
-  minimax_h3_flf2v_turbo: { fps: 24, grid: [17, 5], canvas: h3Canvas },
-  minimax_h3_flf2v: { fps: 24, grid: [17, 5], canvas: h3Canvas },
+  minimax_h3_flf2v: { label: 'Quality', model: 'MiniMax H3', steps: 20, fps: 24, grid: [17, 5], canvas: h3Canvas },
+  minimax_h3_flf2v_turbo: { label: 'Fast', model: 'MiniMax H3 + turbo LoRA', steps: 8, fps: 24, grid: [17, 5], canvas: h3Canvas },
   // Wan 2.2: 16 fps, frame counts on a 4k+1 grid (81 = ~5 s), any size in multiples of 16.
-  wan22_flf2v_fast: { fps: 16, grid: [4, 1], canvas: (w, h) => [w, h] },
-  wan22_flf2v: { fps: 16, grid: [4, 1], canvas: (w, h) => [w, h] },
+  // Only on VMs created with install-wan=true metadata.
+  wan22_flf2v: { label: 'Wan 2.2 quality', model: 'Wan 2.2 14B', steps: 20, fps: 16, grid: [4, 1], canvas: (w, h) => [w, h] },
+  wan22_flf2v_fast: { label: 'Wan 2.2 fast', model: 'Wan 2.2 14B + lightx2v LoRAs', steps: 4, fps: 16, grid: [4, 1], canvas: (w, h) => [w, h] },
 };
 // Seconds of generated video between each pair of frames; the UI can change it per run.
 const DEFAULT_CLIP_SECONDS = 5;
 const MIN_CLIP_SECONDS = 1;
 const MAX_CLIP_SECONDS = 15;
-const DEFAULT_WORKFLOW = process.env.VIDEO_WORKFLOW || 'minimax_h3_flf2v_turbo';
+// Quality over speed: the turbo LoRA's 8 steps lose fine detail such as foliage.
+const DEFAULT_WORKFLOW = process.env.VIDEO_WORKFLOW || 'minimax_h3_flf2v';
 
 if (!API_KEY) {
   console.error('Missing GOOGLE_MAPS_API_KEY. Copy .env.example to .env and fill it in.');
@@ -80,6 +82,8 @@ const server = http.createServer(async (req, res) => {
       const config = {
         apiKey: API_KEY, videoEnabled: Boolean(VIDEO_BUCKET), defaultPrompt: prompts.DEFAULT_DRIVE_DESCRIPTION,
         clipSeconds: DEFAULT_CLIP_SECONDS, minClipSeconds: MIN_CLIP_SECONDS, maxClipSeconds: MAX_CLIP_SECONDS,
+        workflows: Object.entries(WORKFLOWS).map(([name, w]) => ({ name, label: w.label, model: w.model, steps: w.steps })),
+        defaultWorkflow: DEFAULT_WORKFLOW,
         gpuCost: { hourlyUsd: GPU_HOURLY_USD, diskMonthlyUsd: GPU_DISK_MONTHLY_USD },
         comfy: COMFY_ENABLED ? { url: `${comfy.PREFIX}/`, alwaysOn: Boolean(comfy.COMFY_URL) } : null,
       };
@@ -240,7 +244,8 @@ async function createVideoJob({ run, prompt, negativePrompt, stride = 1, maxClip
   if (!(clipSeconds >= MIN_CLIP_SECONDS && clipSeconds <= MAX_CLIP_SECONDS)) {
     throw httpError(400, `Clip length must be between ${MIN_CLIP_SECONDS} and ${MAX_CLIP_SECONDS} seconds`);
   }
-  const [width, height] = preset.canvas(...(manifest.size || '640x640').split('x').map(Number));
+  const sourceSize = manifest.size || '640x640';
+  const [width, height] = preset.canvas(...sourceSize.split('x').map(Number));
   const frameCount = Number(params.frames) || clipFrames(preset, clipSeconds);
   const fps = Number(params.fps) || preset.fps;
   const description = prompt || prompts.DEFAULT_DRIVE_DESCRIPTION;
@@ -261,6 +266,12 @@ async function createVideoJob({ run, prompt, negativePrompt, stride = 1, maxClip
       fps,
       seed: Number.isInteger(params.seed) ? params.seed : crypto.randomInt(2 ** 31),
     },
+    // What the job will run with, shown in the app's job status. The worker
+    // replaces model and steps with what it actually sends to ComfyUI.
+    settings: {
+      workflow, preset: preset.label, model: preset.model, steps: preset.steps,
+      width, height, frames: frameCount, fps, sourceSize,
+    },
     images,
     segments: images.slice(1).map((last, i) => ({
       index: i,
@@ -276,7 +287,7 @@ async function createVideoJob({ run, prompt, negativePrompt, stride = 1, maxClip
   };
   await gcs.uploadJson(VIDEO_BUCKET, `jobs/${id}/job.json`, job);
   await gcs.uploadJson(VIDEO_BUCKET, `jobs/${id}/status.json`, {
-    state: 'queued', clipsDone: 0, clipsTotal: job.segments.length, updatedAt: job.createdAt,
+    state: 'queued', clipsDone: 0, clipsTotal: job.segments.length, settings: job.settings, updatedAt: job.createdAt,
   });
   await gcs.uploadJson(VIDEO_BUCKET, `queue/${id}.json`, { id, job: `jobs/${id}/job.json` });
   // Wake the worker. The job is already queued, so a failure here (no VM yet,
@@ -289,7 +300,7 @@ async function createVideoJob({ run, prompt, negativePrompt, stride = 1, maxClip
     vm = { status: 'UNKNOWN', error: err.message };
   }
   return {
-    id, clips: job.segments.length, seconds: Math.round((job.segments.length * job.params.frames) / job.params.fps), vm,
+    id, clips: job.segments.length, settings: job.settings, seconds: Math.round((job.segments.length * job.params.frames) / job.params.fps), vm,
   };
 }
 

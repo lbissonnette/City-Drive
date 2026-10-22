@@ -71,6 +71,9 @@ window.initMap = function initMap() {
   if (cfg.minClipSeconds) $('videoClipSeconds').min = cfg.minClipSeconds;
   if (cfg.maxClipSeconds) $('videoClipSeconds').max = cfg.maxClipSeconds;
   $('videoClipSeconds').oninput = updateVideoInfo;
+  for (const w of cfg.workflows || []) {
+    $('videoWorkflow').add(new Option(`${w.label}: ${w.model}, ${w.steps} steps`, w.name, false, w.name === cfg.defaultWorkflow));
+  }
   $('videoBtn').onclick = makeVideo;
   $('gpuStartBtn').onclick = () => gpuAction('start');
   $('gpuStopBtn').onclick = () => gpuAction('stop');
@@ -451,6 +454,7 @@ async function makeVideo() {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         run: state.savedRun.run, prompt: $('videoPrompt').value, stride: videoStride(), clipSeconds: videoClipSeconds(),
+        params: { workflow: $('videoWorkflow').value },
       }),
     });
     const data = await resp.json();
@@ -472,7 +476,9 @@ async function pollVideo(id) {
     const s = await resp.json();
     if (!resp.ok) throw new Error(s.error);
     const progress = s.state === 'running' ? ` (${s.step || 'clips'}: ${s.clipsDone}/${s.clipsTotal})` : '';
-    setStatus('videoStatus', `Job ${id}: ${s.state}${progress}${s.error ? ` – ${s.error}` : ''}`, s.state === 'failed');
+    const timing = s.avgClipSeconds ? `, ${s.avgClipSeconds} s per clip` : '';
+    setStatus('videoStatus', `Job ${id}: ${s.state}${progress}${timing}${s.error ? ` – ${s.error}` : ''}`, s.state === 'failed');
+    setStatus('videoSettings', describeSettings(s.settings));
     if (s.state === 'done') {
       $('videoPlayer').src = s.videoUrl;
       $('videoPlayer').hidden = false;
@@ -486,6 +492,15 @@ async function pollVideo(id) {
     setStatus('videoStatus', `Job ${id}: status check failed (${err.message}), retrying`, true);
   }
   state.videoPoll = setTimeout(() => pollVideo(id), 10000);
+}
+
+// "MiniMax H3, 20 steps, 768×768 from 640x640 Street View, 124 frames at 24 fps",
+// plus the model files once the worker has reported what it actually loaded.
+function describeSettings(s) {
+  if (!s) return '';
+  const files = [...(s.modelFiles || []), ...(s.loras || [])];
+  return `${s.model || s.workflow}, ${s.steps} steps, ${s.width}×${s.height} from ${s.sourceSize} Street View, ` +
+    `${s.frames} frames at ${s.fps} fps${files.length ? ` (${files.join(', ')})` : ''}`;
 }
 
 // ---------- GPU worker VM ----------

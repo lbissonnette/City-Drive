@@ -73,7 +73,8 @@ def claim_next_job():
 
 
 def set_status(job, state, **fields):
-    status = {"state": state, "clipsTotal": len(job["segments"]), "updatedAt": now(), **fields}
+    status = {"state": state, "clipsTotal": len(job["segments"]), "settings": job.get("settings"),
+              "updatedAt": now(), **fields}
     bucket.blob(f"jobs/{job['id']}/status.json").upload_from_string(
         json.dumps(status, indent=2), content_type="application/json")
 
@@ -148,6 +149,20 @@ def fill_template(node, values):
     return node
 
 
+def workflow_settings(workflow):
+    """What a filled workflow will actually run: model files, LoRAs and steps."""
+    models, loras, steps = [], [], None
+    for node in workflow.values():
+        inputs = node.get("inputs", {})
+        if node.get("class_type") == "UNETLoader":
+            models.append(inputs["unet_name"])
+        elif "lora_name" in inputs:
+            loras.append(inputs["lora_name"])
+        if isinstance(inputs.get("steps"), int):
+            steps = inputs["steps"]
+    return {"modelFiles": models, "loras": loras, "steps": steps}
+
+
 def run_workflow(workflow, out_path):
     resp = requests.post(f"{COMFY_URL}/prompt",
                          json={"prompt": workflow, "client_id": CLIENT_ID}, timeout=60)
@@ -179,6 +194,13 @@ def run_workflow(workflow, out_path):
                             shutil.copyfileobj(r.raw, f)
                     return
     raise RuntimeError(f"No video in ComfyUI outputs: {json.dumps(entry['outputs'])[:2000]}")
+
+
+def clip_timing(timings):
+    """Seconds per clip so far, for the app's job status."""
+    if not timings:
+        return {}
+    return {"lastClipSeconds": round(timings[-1]), "avgClipSeconds": round(sum(timings) / len(timings))}
 
 
 # ---------- Stitching ----------
@@ -220,9 +242,9 @@ def process(job):
         bucket.blob(name).download_to_filename(str(local))
         comfy_names[name] = upload_image(local, f"{job_id}_{i:04d}.jpg")
 
-    clips = []
+    clips, timings = [], []
     for seg in job["segments"]:
-        set_status(job, "running", step="generating clips", clipsDone=seg["index"])
+        set_status(job, "running", step="generating clips", clipsDone=seg["index"], **clip_timing(timings))
         started = time.time()
         workflow = fill_template(workflow_template, {
             "PROMPT": seg.get("prompt", job["prompt"]),
@@ -236,16 +258,20 @@ def process(job):
             "SEED": params["seed"] + seg["index"],
             "OUTPUT_PREFIX": f"city-drive/{job_id}/clip_{seg['index']:04d}",
         })
+        if seg["index"] == 0:
+            job["settings"] = {**(job.get("settings") or {}), **workflow_settings(workflow)}
+            log(f"Job {job_id}: {json.dumps(job['settings'])}")
         clip = work / "clips" / f"clip_{seg['index']:04d}.mp4"
         run_workflow(workflow, clip)
         clips.append(clip)
-        log(f"Job {job_id}: clip {seg['index'] + 1}/{total} in {time.time() - started:.0f}s")
+        timings.append(time.time() - started)
+        log(f"Job {job_id}: clip {seg['index'] + 1}/{total} in {timings[-1]:.0f}s")
 
-    set_status(job, "running", step="stitching", clipsDone=total)
+    set_status(job, "running", step="stitching", clipsDone=total, **clip_timing(timings))
     final = work / "drive.mp4"
     concat_clips(clips, params["fps"], final)
     bucket.blob(job["output"]).upload_from_filename(str(final), content_type="video/mp4")
-    set_status(job, "done", clipsDone=total, video=job["output"], finishedAt=now())
+    set_status(job, "done", clipsDone=total, video=job["output"], finishedAt=now(), **clip_timing(timings))
     log(f"Job {job_id}: done, gs://{BUCKET}/{job['output']}")
     shutil.rmtree(work, ignore_errors=True)
 
