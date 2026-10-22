@@ -22,7 +22,7 @@ const state = {
   frameIndex: 0,
   playing: null,
   carMarker: null,
-  savedRun: null,    // { run, frames } from the last save, for the video step
+  savedRun: null,    // { run, frames, points } from the last save, for the video step
   videoPoll: null,
   gpuPoll: null,
   gpu: null,        // last /api/gpu response
@@ -71,9 +71,15 @@ window.initMap = function initMap() {
   if (cfg.minClipSeconds) $('videoClipSeconds').min = cfg.minClipSeconds;
   if (cfg.maxClipSeconds) $('videoClipSeconds').max = cfg.maxClipSeconds;
   $('videoClipSeconds').oninput = updateVideoInfo;
+  if (cfg.speedKmh) $('videoSpeed').value = cfg.speedKmh;
+  if (cfg.maxSpeedKmh) $('videoSpeed').max = cfg.maxSpeedKmh;
+  $('videoSpeed').oninput = updateVideoInfo;
+  $('videoTiming').onchange = updateVideoInfo;
+  $('videoWorkflow').onchange = updateVideoInfo;
   for (const w of cfg.workflows || []) {
     $('videoWorkflow').add(new Option(`${w.label}: ${w.model}, ${w.steps} steps`, w.name, false, w.name === cfg.defaultWorkflow));
   }
+  updateVideoInfo();
   $('videoBtn').onclick = makeVideo;
   $('videosRefreshBtn').onclick = loadRecentVideos;
   if (window.CITY_DRIVE_CONFIG?.videoEnabled) {
@@ -420,7 +426,8 @@ async function downloadFrames() {
     $('downloadInfo').innerHTML = `Saved ${data.saved} frames${data.failed ? `, ${data.failed} failed` : ''} to ` +
       `<code>output/${data.run}/</code> (<a href="${data.baseUrl}manifest.json" target="_blank">manifest</a>).`;
     $('downloadInfo').classList.remove('error');
-    state.savedRun = data.inBucket ? { run: data.run, frames: data.saved } : null;
+    const points = data.frames.filter((f) => f.ok).map((f) => ({ lat: f.lat, lng: f.lng }));
+    state.savedRun = data.inBucket ? { run: data.run, frames: data.saved, points } : null;
     updateVideoInfo();
   } catch (err) {
     setStatus('downloadInfo', `Download failed: ${err.message}`, true);
@@ -441,14 +448,50 @@ function videoClipSeconds() {
   return Math.min(Number(input.max), Math.max(Number(input.min), seconds));
 }
 
+function videoSpeed() {
+  if ($('videoTiming').value !== 'speed') return null;
+  const input = $('videoSpeed');
+  const kmh = Number(input.value) || window.CITY_DRIVE_CONFIG?.speedKmh || 30;
+  return Math.min(Number(input.max), Math.max(Number(input.min), kmh));
+}
+
+// Same plan the server makes (public/timing.js), for the estimate.
+function videoPlan(saved) {
+  const cfg = window.CITY_DRIVE_CONFIG || {};
+  const w = (cfg.workflows || []).find((x) => x.name === $('videoWorkflow').value) || { fps: 24, grid: [17, 5] };
+  return CityDriveTiming.planClips({
+    frames: saved.points, picked: CityDriveTiming.pickFrames(saved.frames, videoStride()), preset: w,
+    speedKmh: videoSpeed(), clipSeconds: videoClipSeconds(),
+    minSeconds: Number($('videoClipSeconds').min), maxSeconds: Number($('videoClipSeconds').max),
+  });
+}
+
 function updateVideoInfo() {
+  const bySpeed = $('videoTiming').value === 'speed';
+  $('videoSpeedRow').hidden = !bySpeed;
+  $('videoClipSecondsRow').hidden = bySpeed;
   const saved = state.savedRun;
   $('videoBtn').disabled = !saved || saved.frames < 2;
   if (!saved) return setStatus('videoInfo', 'Save frames first.');
-  // Matches the server's selection: every Nth frame plus the last one.
-  const used = Math.ceil(saved.frames / videoStride()) + ((saved.frames - 1) % videoStride() ? 1 : 0);
-  const clips = Math.max(0, used - 1);
-  setStatus('videoInfo', `${clips} clips from run ${saved.run}, about ${Math.round(clips * videoClipSeconds())} s of video.`);
+  const plan = videoPlan(saved);
+  const seconds = Math.round(plan.reduce((t, c) => t + c.seconds, 0));
+  let info = `${plan.length} clips from run ${saved.run}, about ${formatDuration(seconds)} of video.`;
+  if (bySpeed && plan.length) {
+    const km = plan.reduce((t, c) => t + c.meters, 0) / 1000;
+    const lengths = plan.map((c) => c.seconds);
+    info += ` ${km.toFixed(2)} km at ${videoSpeed()} km/h, clips ${Math.min(...lengths).toFixed(1)}–${Math.max(...lengths).toFixed(1)} s.`;
+    const short = plan.filter((c) => c.clamped === 'short').length;
+    const long = plan.filter((c) => c.clamped === 'long').length;
+    const min = $('videoClipSeconds').min;
+    const max = $('videoClipSeconds').max;
+    if (short) info += ` ${short} clip${short > 1 ? 's' : ''} with frames very close together will run at the ${min} s minimum, so the drive slows there.`;
+    if (long) info += ` ${long} gap${long > 1 ? 's are' : ' is'} too long for ${max} s at this speed, so the drive speeds up there (use more frames or a lower speed).`;
+  }
+  setStatus('videoInfo', info);
+}
+
+function formatDuration(seconds) {
+  return seconds < 60 ? `${seconds} s` : `${Math.floor(seconds / 60)} min ${seconds % 60} s`;
 }
 
 async function makeVideo() {
@@ -461,7 +504,7 @@ async function makeVideo() {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
-        run: state.savedRun.run, prompt: $('videoPrompt').value, stride: videoStride(), clipSeconds: videoClipSeconds(),
+        run: state.savedRun.run, prompt: $('videoPrompt').value, stride: videoStride(), clipSeconds: videoClipSeconds(), speedKmh: videoSpeed(),
         params: { workflow: $('videoWorkflow').value },
       }),
     });
@@ -515,7 +558,8 @@ function describeSettings(s) {
   if (!s) return '';
   const files = [...(s.modelFiles || []), ...(s.loras || [])];
   return `${s.model || s.workflow}, ${s.steps} steps, ${s.width}×${s.height} from ${s.sourceSize} Street View, ` +
-    `${s.frames} frames at ${s.fps} fps${files.length ? ` (${files.join(', ')})` : ''}`;
+    `${s.frames} frames at ${s.fps} fps${s.speedKmh ? ` (${s.speedKmh} km/h)` : ''}` +
+    `${files.length ? ` (${files.join(', ')})` : ''}`;
 }
 
 async function loadRecentVideos() {

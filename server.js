@@ -18,6 +18,7 @@ const gcs = require('./gcs');
 const prompts = require('./prompts');
 const gpu = require('./compute');
 const comfy = require('./comfy-proxy');
+const timing = require('./public/timing');
 
 loadDotEnv(path.join(__dirname, '.env'));
 
@@ -47,6 +48,10 @@ const WORKFLOWS = {
 const DEFAULT_CLIP_SECONDS = 5;
 const MIN_CLIP_SECONDS = 1;
 const MAX_CLIP_SECONDS = 15;
+// Or a driving speed, which sets each clip's length from the distance between
+// its frames (clamped to the clip limits above). 30 km/h suits city streets.
+const DEFAULT_SPEED_KMH = 30;
+const MAX_SPEED_KMH = 200;
 // Quality over speed: the turbo LoRA's 8 steps lose fine detail such as foliage.
 const DEFAULT_WORKFLOW = process.env.VIDEO_WORKFLOW || 'minimax_h3_flf2v';
 
@@ -82,7 +87,10 @@ const server = http.createServer(async (req, res) => {
       const config = {
         apiKey: API_KEY, videoEnabled: Boolean(VIDEO_BUCKET), defaultPrompt: prompts.DEFAULT_DRIVE_DESCRIPTION,
         clipSeconds: DEFAULT_CLIP_SECONDS, minClipSeconds: MIN_CLIP_SECONDS, maxClipSeconds: MAX_CLIP_SECONDS,
-        workflows: Object.entries(WORKFLOWS).map(([name, w]) => ({ name, label: w.label, model: w.model, steps: w.steps })),
+        speedKmh: DEFAULT_SPEED_KMH, maxSpeedKmh: MAX_SPEED_KMH,
+        workflows: Object.entries(WORKFLOWS).map(([name, w]) => ({
+          name, label: w.label, model: w.model, steps: w.steps, fps: w.fps, grid: w.grid,
+        })),
         defaultWorkflow: DEFAULT_WORKFLOW,
         gpuCost: { hourlyUsd: GPU_HOURLY_USD, diskMonthlyUsd: GPU_DISK_MONTHLY_USD },
         comfy: COMFY_ENABLED ? { url: `${comfy.PREFIX}/`, alwaysOn: Boolean(comfy.COMFY_URL) } : null,
@@ -230,16 +238,18 @@ async function downloadFrames({ frames, size = '640x640', fov = 90, pitch = 0, l
 //   gs://<bucket>/jobs/<id>/status.json  written by the worker as it goes
 //   gs://<bucket>/jobs/<id>/drive.mp4    the finished video
 //   gs://<bucket>/queue/<id>.json        marker the worker picks up and deletes
-async function createVideoJob({ run, prompt, negativePrompt, stride = 1, maxClips, clipSeconds, params = {} }) {
+//
+// With speedKmh, each segment gets its own length (segments[].frames, which the
+// worker prefers over params.frames) from the distance between its frames.
+async function createVideoJob({ run, prompt, negativePrompt, stride = 1, maxClips, clipSeconds, speedKmh, params = {} }) {
   if (!VIDEO_BUCKET) throw httpError(503, 'Video is not set up: VIDEO_BUCKET is empty');
   if (typeof run !== 'string' || !/^[\w.-]+$/.test(run)) throw httpError(400, 'run must be a saved run name');
   const manifest = await gcs.readJson(VIDEO_BUCKET, `runs/${run}/manifest.json`);
   if (!manifest) throw httpError(404, `No frames in the bucket for run ${run}. Save frames again.`);
 
-  stride = Math.max(1, Math.floor(Number(stride) || 1));
-  let frames = manifest.frames.filter((f) => f.ok);
-  frames = frames.filter((_, i) => i % stride === 0 || i === frames.length - 1);
-  if (maxClips) frames = frames.slice(0, Math.max(1, Number(maxClips)) + 1);
+  const saved = manifest.frames.filter((f) => f.ok);
+  const picked = timing.pickFrames(saved.length, stride, maxClips);
+  const frames = picked.map((i) => saved[i]);
   const images = frames.map((f) => `runs/${run}/${f.file}`);
   if (images.length < 2) throw httpError(400, 'Need at least two saved frames to make a video');
 
@@ -252,8 +262,27 @@ async function createVideoJob({ run, prompt, negativePrompt, stride = 1, maxClip
   }
   const sourceSize = manifest.size || '640x640';
   const [width, height] = preset.canvas(...sourceSize.split('x').map(Number));
-  const frameCount = Number(params.frames) || clipFrames(preset, clipSeconds);
+  speedKmh = speedKmh == null || speedKmh === '' || params.frames ? null : Number(speedKmh);
+  if (speedKmh !== null && !(speedKmh > 0 && speedKmh <= MAX_SPEED_KMH)) {
+    throw httpError(400, `Speed must be between 1 and ${MAX_SPEED_KMH} km/h`);
+  }
   const fps = Number(params.fps) || preset.fps;
+  const plan = timing.planClips({
+    frames: saved, picked, preset: { fps, grid: preset.grid }, speedKmh, clipSeconds,
+    minSeconds: MIN_CLIP_SECONDS, maxSeconds: MAX_CLIP_SECONDS,
+  });
+  if (speedKmh && plan.some((c) => !Number.isFinite(c.meters))) {
+    throw httpError(400, `Run ${run} has frames without a location; use seconds per clip instead`);
+  }
+  if (params.frames) for (const c of plan) [c.frames, c.seconds] = [Number(params.frames), Number(params.frames) / fps];
+  const counts = plan.map((c) => c.frames);
+  // One count for the whole job: the fixed length, or in speed mode the one
+  // nearest the average (what a worker that predates per-segment frames uses).
+  const frameCount = speedKmh
+    ? timing.clipFrames({ fps, grid: preset.grid }, plan.reduce((t, c) => t + c.seconds, 0) / plan.length)
+    : counts[0];
+  const minFrames = Math.min(...counts);
+  const maxFrames = Math.max(...counts);
   const description = prompt || prompts.DEFAULT_DRIVE_DESCRIPTION;
   const id = `${new Date().toISOString().replace(/[-:.TZ]/g, '').slice(0, 14)}-${crypto.randomBytes(3).toString('hex')}`;
   const job = {
@@ -276,15 +305,22 @@ async function createVideoJob({ run, prompt, negativePrompt, stride = 1, maxClip
     // replaces model and steps with what it actually sends to ComfyUI.
     settings: {
       workflow, preset: preset.label, model: preset.model, steps: preset.steps,
-      width, height, frames: frameCount, fps, sourceSize,
+      width, height, frames: minFrames === maxFrames ? minFrames : `${minFrames}–${maxFrames}`, fps, sourceSize,
+      ...(speedKmh && {
+        speedKmh,
+        clampedShort: plan.filter((c) => c.clamped === 'short').length,
+        clampedLong: plan.filter((c) => c.clamped === 'long').length,
+      }),
     },
     images,
     segments: images.slice(1).map((last, i) => ({
       index: i,
       first: images[i],
       last,
+      frames: plan[i].frames,
+      ...(Number.isFinite(plan[i].meters) && { meters: Math.round(plan[i].meters) }),
       prompt: prompts.clipPrompt(workflow, {
-        seconds: frameCount / fps,
+        seconds: plan[i].seconds,
         turn: prompts.headingDelta(Number(frames[i].heading), Number(frames[i + 1].heading)),
         description,
       }),
@@ -306,14 +342,8 @@ async function createVideoJob({ run, prompt, negativePrompt, stride = 1, maxClip
     vm = { status: 'UNKNOWN', error: err.message };
   }
   return {
-    id, clips: job.segments.length, settings: job.settings, seconds: Math.round((job.segments.length * job.params.frames) / job.params.fps), vm,
+    id, clips: job.segments.length, settings: job.settings, seconds: Math.round(counts.reduce((t, n) => t + n, 0) / fps), vm,
   };
-}
-
-// Frame count closest to the requested clip length that the model accepts
-// (5 s gives 124 for H3 and 81 for Wan 2.2, the counts they were trained on).
-function clipFrames({ fps, grid: [step, offset] }, seconds) {
-  return Math.max(1, Math.round((seconds * fps - offset) / step)) * step + offset;
 }
 
 // The newest jobs in the bucket, so a closed or reloaded page can find its videos
