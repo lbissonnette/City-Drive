@@ -56,7 +56,21 @@ for its clip, built by [`prompts.js`](../prompts.js) (see [Prompts](#prompts) be
 the worker falls back to the job's `prompt` when a segment has none.
 
 `status.json` goes `queued` → `running` (with `step` and `clipsDone`/`clipsTotal`)
-→ `done` or `failed` (with `error`). The app polls it and plays the video when done.
+→ `done`, `failed` (with `error`) or `cancelled`. The app polls it and plays the video
+when done. Its **Recent videos** list (`GET /api/videos`) reads the newest jobs from the
+bucket, so a job can be reopened after the page was closed.
+
+**Restarts:** a job that a worker restart (`gpu-vm.sh push`) or reboot cuts off is
+picked up again when the worker starts. Its work dir is still on disk, and clips
+already made (in that dir or in ComfyUI's `output/city-drive/<id>/`) are reused rather
+than regenerated. A failure while stitching or uploading marks the job `failed` with
+ffmpeg's error, which the app shows.
+
+**Cancelling** (`POST /api/video/<id>/cancel`, the Cancel button in that list) writes
+`jobs/<id>/cancel.json`. A queued job also loses its queue marker and is marked
+`cancelled` at once. For a running job, the worker checks for the flag before each clip
+and every ~10 s while one generates; it then drops the prompt from ComfyUI's queue,
+interrupts it, discards the clips and marks the job `cancelled`.
 
 ### Per job, the worker
 
@@ -67,9 +81,9 @@ the worker falls back to the job's `prompt` when a segment has none.
    the first (it's the same image the previous clip ended on),
 4. uploads `drive.mp4` and marks the job done.
 
-Jobs run one at a time. **No failure tolerance (v1):** a job's queue marker is deleted
-when the worker claims it, so if the spot VM is preempted mid-job that job stays
-`running` forever and has to be resubmitted from the app.
+Jobs run one at a time. A job's queue marker is deleted when the worker claims it; if
+the VM stops mid-job (preemption, idle stop, a restart), the job resumes from its saved
+clips the next time the worker starts (see **Restarts** below).
 
 ## The model
 
@@ -156,20 +170,37 @@ What `prompts.js` follows from the guide:
 
 ### Adding another model
 
-1. Get its files onto the VM (add `fetch` lines to `vm-startup.sh`) and build its
-   first+last-frame workflow in the ComfyUI UI.
+1. Upload its files to the models bucket in ComfyUI's layout, e.g.
+   `gcloud storage cp my_lora.safetensors gs://<PROJECT_ID>-city-drive-models/models/loras/`.
+   The next boot (or `gpu-vm.sh up` on a running VM) copies them to the VM. The copy
+   never overwrites a file the VM already has, so a changed model needs a new filename.
+   If a fresh project should get the model without anyone uploading it, also add it to
+   `MODELS` in `vm-startup.sh` with its download URL. Then build its first+last-frame
+   workflow in the ComfyUI UI.
 2. **Export (API)** it to JSON and replace the values the worker should fill with
    these placeholder strings: `{{FIRST_IMAGE}}`, `{{LAST_IMAGE}}` (the two `LoadImage`
    nodes), `{{PROMPT}}`, `{{NEGATIVE_PROMPT}}`, `{{WIDTH}}`, `{{HEIGHT}}`, `{{FRAMES}}`,
    `{{FPS}}`, `{{SEED}}`, and `{{OUTPUT_PREFIX}}` (the save node's filename prefix). The
    workflow must end in a node that saves an `.mp4`/`.webm` (e.g. `SaveVideo`).
 3. Save it as `worker/workflows/<name>.json`, add it to `WORKFLOWS` in `server.js`
-   (frame count, fps, canvas size), and run `./scripts/gpu-vm.sh push`.
+   (frame count, fps, canvas size), and generate its UI-format twin
+   `<name>.ui.json` with `scripts/workflow-ui.mjs` (see below). Then run `./scripts/gpu-vm.sh push`.
+
+### Opening a clip's workflow in ComfyUI
+
+Each workflow has a `<name>.ui.json` twin: the same graph in ComfyUI's editable
+(UI) format, with the same placeholders. The worker fills both and sends the UI one
+as the prompt's `extra_pnginfo.workflow`, so in ComfyUI's queue/history panel
+**Open workflow** (or opening the clip's video) shows the exact graph that made the
+clip: frames, prompt, size and a fixed seed, ready to tweak and re-queue. The twins
+are generated, not hand-edited: after changing an API-format workflow, regenerate
+with `node scripts/workflow-ui.mjs <comfy-url> worker/workflows/<name>.json`.
 
 ## Running it
 
 Once per project, `scripts/gcp-setup.sh` (see [DEPLOY.md](../DEPLOY.md)) creates the
-bucket, gives the app and the `city-drive-gpu-worker` service account access to it,
+video and models buckets (re-run it if you set up before the models bucket existed),
+gives the app and the `city-drive-gpu-worker` service account access to them,
 and sets the `GCP_VIDEO_BUCKET` repo variable so the deployed app shows the video step.
 
 You'll most likely also need **GPU quota**: new projects usually have 0 spot RTX PRO
@@ -189,9 +220,18 @@ first family in its `IMAGE_CANDIDATES` list that exists (Deep Learning VM, then 
 accelerator images), and falls back to plain Ubuntu 22.04 with Google's driver
 installer. Building the driver on the stock Ubuntu 24.04 image fails on its newer
 kernels. Override with `IMAGE_PROJECT` + `IMAGE_FAMILY`. The first boot then installs
-ComfyUI (Python 3.12 via uv, CUDA 13 PyTorch, or 12.8 on a pre-580 driver) and ~38 GB
-of MiniMax H3 weights from Hugging Face. Allow 20–30 minutes. Later boots reuse the disk and start in a couple
-of minutes. When Google reclaims the spot VM it is **stopped**, not deleted; run `up`
+ComfyUI (pinned to v0.37.0, Python 3.12 via uv, PyTorch 2.14 for CUDA 13, or the latest
+12.8 build on a pre-580 driver) and ~38 GB of MiniMax H3 weights. Allow 20–30 minutes.
+Later boots reuse the disk and start in a couple of minutes.
+
+The weights come from the **models bucket**, `gs://<PROJECT_ID>-city-drive-models/models/`,
+in ComfyUI's own layout (`diffusion_models/`, `text_encoders/`, `vae/`, `loras/`). Every
+boot copies anything new in it to the VM's disk. The very first boot in a project finds
+the bucket empty: it downloads each file `vm-startup.sh` lists from Hugging Face and
+uploads it, or uploads the copy already on disk if the VM had downloaded it before the
+bucket existed. After that, Hugging Face is out of the loop: the same files stay in use
+until you change the bucket, and a recreated VM pulls them from same-region GCS.
+Everything in the bucket is copied, so `DISK_SIZE_GB` has to hold all of it. When Google reclaims the spot VM it is **stopped**, not deleted; run `up`
 again to bring it back.
 
 The VM costs money while it runs, so it **stops itself when idle**: once no job has
@@ -227,6 +267,14 @@ Keep the app private if you use this, since anyone who can open the app can driv
 ComfyUI. If you set up before this existed, re-run `gcp-setup.sh` (the deployer needs
 `roles/compute.networkViewer`) and `gpu-vm.sh up` (firewall, tag, ComfyUI listening
 on the VPC), then redeploy.
+
+The app finds the VM's internal IP through the Compute API, with the same
+`cityDriveGpuControl` role as Start/Stop. If that lookup fails (a 403 means
+`gcp-setup.sh` hasn't been re-run), the button stays clickable and the page it opens
+says why. To skip the lookup, set the repo variable `GCP_COMFY_URL` to
+`http://<internal IP>:8188` and redeploy; the IP survives stop/start and changes only
+if the VM is recreated:
+`gcloud compute instances describe city-drive-gpu --zone=<zone> --format='value(networkInterfaces[0].networkIP)'`.
 
 Without the app, `PROJECT_ID=... ./scripts/gpu-vm.sh tunnel` forwards ComfyUI over
 SSH to http://localhost:8188. To use the tunnel from a locally running app, set

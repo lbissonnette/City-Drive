@@ -74,5 +74,7 @@ jobs:
           env_vars: |
             VIDEO_BUCKET=${{ vars.GCP_VIDEO_BUCKET }}
             GPU_VM_HOURLY_USD=${{ vars.GPU_VM_HOURLY_USD }}
+            # Optional fixed ComfyUI address for /comfy/; empty = look the VM up.
+            COMFY_URL=${{ vars.GCP_COMFY_URL }}
 
       - run: echo "Deployed to ${{ steps.deploy.outputs.url }}"

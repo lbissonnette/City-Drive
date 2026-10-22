@@ -95,6 +95,9 @@ const server = http.createServer(async (req, res) => {
     if (req.method === 'POST' && url.pathname === '/api/download') {
       return sendJson(res, 200, await downloadFrames(await readJson(req)));
     }
+    if (req.method === 'GET' && url.pathname === '/api/videos') {
+      return sendJson(res, 200, await recentVideos(Number(url.searchParams.get('limit')) || 20));
+    }
     if (req.method === 'POST' && url.pathname === '/api/video') {
       return sendJson(res, 200, await createVideoJob(await readJson(req)));
     }
@@ -104,6 +107,8 @@ const server = http.createServer(async (req, res) => {
       if (req.method === 'POST' && url.pathname === '/api/gpu/start') return sendJson(res, 200, await gpu.start());
       if (req.method === 'POST' && url.pathname === '/api/gpu/stop') return sendJson(res, 200, await gpu.stop());
     }
+    const cancelMatch = url.pathname.match(/^\/api\/video\/([\w-]+)\/cancel$/);
+    if (req.method === 'POST' && cancelMatch) return sendJson(res, 200, await cancelVideo(cancelMatch[1]));
     const videoMatch = url.pathname.match(/^\/api\/video\/([\w-]+)(\/drive\.mp4)?$/);
     if (req.method === 'GET' && videoMatch) {
       return videoMatch[2] ? streamVideo(req, res, videoMatch[1]) : sendJson(res, 200, await videoStatus(videoMatch[1]));
@@ -310,6 +315,60 @@ function clipFrames({ fps, grid: [step, offset] }, seconds) {
   return Math.max(1, Math.round((seconds * fps - offset) / step)) * step + offset;
 }
 
+// The newest jobs in the bucket, so a closed or reloaded page can find its videos
+// again. Job ids start with a UTC timestamp, so they sort by age.
+async function recentVideos(limit) {
+  if (!VIDEO_BUCKET) throw httpError(503, 'Video is not set up: VIDEO_BUCKET is empty');
+  const ids = (await gcs.listPrefixes(VIDEO_BUCKET, 'jobs/'))
+    .map((p) => p.slice('jobs/'.length, -1))
+    .filter((id) => /^[\w-]+$/.test(id))
+    .sort()
+    .reverse()
+    .slice(0, Math.min(Math.max(limit, 1), 100));
+  const jobs = await Promise.all(ids.map(async (id) => {
+    const [job, status] = await Promise.all([
+      gcs.readJson(VIDEO_BUCKET, `jobs/${id}/job.json`),
+      gcs.readJson(VIDEO_BUCKET, `jobs/${id}/status.json`),
+    ]);
+    if (!job || !status) return null;
+    return {
+      id,
+      createdAt: job.createdAt,
+      label: job.label,
+      run: job.run,
+      clips: job.segments.length,
+      seconds: Math.round((job.segments.length * job.params.frames) / job.params.fps),
+      state: status.state,
+      step: status.step,
+      clipsDone: status.clipsDone,
+      error: status.error,
+      cancelRequested: Boolean(status.cancelRequested),
+      videoUrl: status.state === 'done' ? `/api/video/${id}/drive.mp4` : null,
+    };
+  }));
+  return { videos: jobs.filter(Boolean) };
+}
+
+// Queued: drop the queue marker so the worker never picks it up. Running: the
+// worker sees jobs/<id>/cancel.json between status checks, interrupts ComfyUI and
+// marks the job cancelled. The flag is written in both cases, which also covers a
+// job the worker claims at the same moment.
+async function cancelVideo(id) {
+  if (!VIDEO_BUCKET) throw httpError(503, 'Video is not set up: VIDEO_BUCKET is empty');
+  const status = await gcs.readJson(VIDEO_BUCKET, `jobs/${id}/status.json`);
+  if (!status) throw httpError(404, 'No such video job');
+  if (!['queued', 'running'].includes(status.state)) return { id, state: status.state };
+  await gcs.uploadJson(VIDEO_BUCKET, `jobs/${id}/cancel.json`, { requestedAt: new Date().toISOString() });
+  if (status.state === 'queued') {
+    await gcs.remove(VIDEO_BUCKET, `queue/${id}.json`);
+    const cancelled = { ...status, state: 'cancelled', updatedAt: new Date().toISOString() };
+    await gcs.uploadJson(VIDEO_BUCKET, `jobs/${id}/status.json`, cancelled);
+    return { id, state: 'cancelled' };
+  }
+  await gcs.uploadJson(VIDEO_BUCKET, `jobs/${id}/status.json`, { ...status, cancelRequested: true });
+  return { id, state: 'cancelling' };
+}
+
 async function videoStatus(id) {
   if (!VIDEO_BUCKET) throw httpError(503, 'Video is not set up: VIDEO_BUCKET is empty');
   const status = await gcs.readJson(VIDEO_BUCKET, `jobs/${id}/status.json`);
@@ -317,13 +376,34 @@ async function videoStatus(id) {
   return { id, ...status, videoUrl: status.state === 'done' ? `/api/video/${id}/drive.mp4` : null };
 }
 
+// Cloud Run caps an HTTP/1 response with a Content-Length at 32 MiB, and a
+// stitched drive is often bigger, so each Range response is at most this
+// much; the browser asks for the next piece as it plays or seeks.
+const VIDEO_CHUNK_BYTES = 8 * 1024 * 1024;
+
 // Proxies the finished video from the (private) bucket, passing Range through
-// so the browser can seek.
+// (clamped to VIDEO_CHUNK_BYTES) so the browser can seek.
 async function streamVideo(req, res, id) {
   if (!VIDEO_BUCKET) throw httpError(503, 'Video is not set up: VIDEO_BUCKET is empty');
-  const upstream = await gcs.download(VIDEO_BUCKET, `jobs/${id}/drive.mp4`, req.headers.range);
+  let range = req.headers.range;
+  const m = range && range.match(/^bytes=(\d+)-(\d*)$/);
+  if (m) {
+    const start = Number(m[1]);
+    const end = m[2] ? Math.min(Number(m[2]), start + VIDEO_CHUNK_BYTES - 1) : start + VIDEO_CHUNK_BYTES - 1;
+    range = `bytes=${start}-${end}`;
+  }
+  let upstream;
+  try {
+    upstream = await gcs.download(VIDEO_BUCKET, `jobs/${id}/drive.mp4`, range);
+  } catch (err) {
+    if (err.status === 416) return send(res, 416, 'Range not satisfiable');
+    throw err;
+  }
   const headers = { 'Content-Type': 'video/mp4', 'Accept-Ranges': 'bytes' };
-  for (const h of ['content-length', 'content-range']) {
+  // A whole-file (non-Range) response goes out chunked, with no Content-Length,
+  // which Cloud Run streams without the size cap.
+  const pass = upstream.status === 206 ? ['content-length', 'content-range'] : [];
+  for (const h of pass) {
     if (upstream.headers.get(h)) headers[h] = upstream.headers.get(h);
   }
   res.writeHead(upstream.status, headers);

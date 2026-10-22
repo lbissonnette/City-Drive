@@ -25,6 +25,14 @@ button.primary { background: #1a73e8; border-color: #1a73e8; color: #fff; }
 button:disabled { opacity: 0.5; cursor: default; }
 progress { width: 100%; margin-top: 8px; }
 textarea { width: 100%; font: inherit; margin: 4px 0; }
+#videoSection h3 { margin: 12px 0 0; font-size: 14px; }
+.video-list { list-style: none; margin: 4px 0 0; padding: 0; }
+.video-list li { padding: 6px 8px; border: 1px solid #e5e5e5; border-radius: 6px; margin: 4px 0; cursor: pointer; background: #fff; }
+.video-list li:hover, .video-list li.selected { border-color: #1a73e8; }
+.video-list .meta { color: #666; font-size: 12px; }
+.video-list .failed { color: #b00020; }
+.video-list li { position: relative; }
+.video-list button.cancel { position: absolute; top: 6px; right: 6px; padding: 2px 8px; font-size: 12px; }
 #videoPlayer { width: 100%; margin-top: 8px; background: #000; }
 
 #yearChart { margin-top: 8px; }
