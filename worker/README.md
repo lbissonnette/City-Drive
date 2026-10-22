@@ -60,6 +60,12 @@ the worker falls back to the job's `prompt` when a segment has none.
 when done. Its **Recent videos** list (`GET /api/videos`) reads the newest jobs from the
 bucket, so a job can be reopened after the page was closed.
 
+**Restarts:** a job that a worker restart (`gpu-vm.sh push`) or reboot cuts off is
+picked up again when the worker starts. Its work dir is still on disk, and clips
+already made (in that dir or in ComfyUI's `output/city-drive/<id>/`) are reused rather
+than regenerated. A failure while stitching or uploading marks the job `failed` with
+ffmpeg's error, which the app shows.
+
 **Cancelling** (`POST /api/video/<id>/cancel`, the Cancel button in that list) writes
 `jobs/<id>/cancel.json`. A queued job also loses its queue marker and is marked
 `cancelled` at once. For a running job, the worker checks for the flag before each clip
@@ -75,9 +81,9 @@ interrupts it, discards the clips and marks the job `cancelled`.
    the first (it's the same image the previous clip ended on),
 4. uploads `drive.mp4` and marks the job done.
 
-Jobs run one at a time. **No failure tolerance (v1):** a job's queue marker is deleted
-when the worker claims it, so if the spot VM is preempted mid-job that job stays
-`running` forever and has to be resubmitted from the app.
+Jobs run one at a time. A job's queue marker is deleted when the worker claims it; if
+the VM stops mid-job (preemption, idle stop, a restart), the job resumes from its saved
+clips the next time the worker starts (see **Restarts** below).
 
 ## The model
 

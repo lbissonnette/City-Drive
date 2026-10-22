@@ -9,14 +9,15 @@ bucket for queued jobs (written by server.js /api/video), and for each one:
   3. concatenates the clips with ffmpeg
   4. uploads gs://<bucket>/jobs/<id>/drive.mp4 and marks the job done
 
-v1 has no failure tolerance: jobs run one at a time, and if the VM is
-preempted the job in progress is lost (its queue marker is deleted on claim).
+Jobs run one at a time. One cut off by a worker restart or reboot resumes when
+the worker starts again, reusing the clips it already made.
 
 Settings (environment variables):
   VIDEO_BUCKET    required. The bucket the app writes jobs to.
   COMFY_URL       default http://127.0.0.1:8188
   WORKFLOW_DIR    default ./workflows next to this file
   WORK_DIR        default /var/lib/city-drive-worker
+  COMFY_OUTPUT_DIR  default /opt/ComfyUI/output (where finished clips are looked up on resume)
   POLL_SECONDS    default 15
   IDLE_SHUTDOWN_MINUTES  default 10. Powers the VM off after this many minutes
                   with no job running or queued, which stops GPU billing (the
@@ -40,6 +41,7 @@ BUCKET = os.environ.get("VIDEO_BUCKET") or sys.exit("VIDEO_BUCKET is not set")
 COMFY_URL = os.environ.get("COMFY_URL", "http://127.0.0.1:8188").rstrip("/")
 WORKFLOW_DIR = Path(os.environ.get("WORKFLOW_DIR", Path(__file__).parent / "workflows"))
 WORK_DIR = Path(os.environ.get("WORK_DIR", "/var/lib/city-drive-worker"))
+COMFY_OUTPUT_DIR = Path(os.environ.get("COMFY_OUTPUT_DIR", "/opt/ComfyUI/output"))
 POLL_SECONDS = int(os.environ.get("POLL_SECONDS", "15"))
 IDLE_SHUTDOWN_MINUTES = float(os.environ.get("IDLE_SHUTDOWN_MINUTES", "10"))
 # On tmpfs, so it survives worker restarts (a crash loop can't keep the VM up
@@ -221,11 +223,25 @@ def concat_clips(clips, fps, out_path):
         + f"concat=n={len(clips)}:v=1:a=0[out]"
     script = out_path.with_suffix(".filter")
     script.write_text(graph)  # a file, since hundreds of clips overflow the command line
-    subprocess.run(
+    result = subprocess.run(
         ["ffmpeg", "-y", "-loglevel", "error", *inputs, "-filter_complex_script", str(script),
          "-map", "[out]", "-c:v", "libx264", "-preset", "medium", "-crf", "18", "-pix_fmt", "yuv420p",
          "-r", str(fps), "-movflags", "+faststart", str(out_path)],
-        check=True)
+        capture_output=True, text=True)
+    if result.returncode != 0:
+        raise RuntimeError(f"Stitching with ffmpeg failed: {result.stderr.strip()[-800:]}")
+
+
+def existing_clip(job_id, index, dest):
+    """Reuses a clip made before a worker restart: our copy, or ComfyUI's own output."""
+    if dest.exists() and dest.stat().st_size > 0:
+        return True
+    made = sorted((COMFY_OUTPUT_DIR / "city-drive" / job_id).glob(f"clip_{index:04d}_*.mp4"),
+                  key=lambda p: p.stat().st_mtime)
+    if made and made[-1].stat().st_size > 0:
+        shutil.copyfile(made[-1], dest)
+        return True
+    return False
 
 
 # ---------- Main ----------
@@ -270,6 +286,10 @@ def process(job):
         }
         ui_workflow = fill_template(ui_template, values) if ui_template else None
         clip = work / "clips" / f"clip_{seg['index']:04d}.mp4"
+        if existing_clip(job_id, seg["index"], clip):
+            log(f"Job {job_id}: clip {seg['index'] + 1}/{total} already made, reusing it")
+            clips.append(clip)
+            continue
         run_workflow(fill_template(workflow_template, values), clip, ui_workflow, job)
         clips.append(clip)
         log(f"Job {job_id}: clip {seg['index'] + 1}/{total} in {time.time() - started:.0f}s")
@@ -277,6 +297,7 @@ def process(job):
     set_status(job, "running", step="stitching", clipsDone=total)
     final = work / "drive.mp4"
     concat_clips(clips, params["fps"], final)
+    set_status(job, "running", step="uploading", clipsDone=total)
     bucket.blob(job["output"]).upload_from_filename(str(final), content_type="video/mp4")
     set_status(job, "done", clipsDone=total, video=job["output"], finishedAt=now())
     log(f"Job {job_id}: done, gs://{BUCKET}/{job['output']}")
@@ -289,6 +310,7 @@ def main():
     wait_for_comfy()
     idle = f"shutting down after {IDLE_SHUTDOWN_MINUTES:g} idle minutes" if IDLE_SHUTDOWN_MINUTES > 0 \
         else "idle shutdown off"
+    resume_interrupted_jobs()
     log(f"Polling gs://{BUCKET}/queue/ every {POLL_SECONDS}s, {idle}")
     while True:
         job = claim_next_job()
@@ -298,17 +320,37 @@ def main():
             shutdown_if_idle()
             time.sleep(POLL_SECONDS)
             continue
-        mark_active()
-        try:
-            process(job)
-        except JobCancelled:
-            log(f"Job {job['id']} cancelled")
-            set_status(job, "cancelled", finishedAt=now())
-            shutil.rmtree(WORK_DIR / job["id"], ignore_errors=True)
-        except Exception as err:  # v1: report and move on to the next job
-            log(f"Job {job['id']} failed: {err}")
-            set_status(job, "failed", error=str(err)[:1000], finishedAt=now())
-        mark_active()  # the idle clock starts when the job ends
+        run_job(job)
+
+
+def run_job(job):
+    mark_active()
+    try:
+        process(job)
+    except JobCancelled:
+        log(f"Job {job['id']} cancelled")
+        set_status(job, "cancelled", finishedAt=now())
+        shutil.rmtree(WORK_DIR / job["id"], ignore_errors=True)
+    except Exception as err:  # report it on the job (the app shows it) and move on
+        log(f"Job {job['id']} failed: {err}")
+        set_status(job, "failed", error=str(err)[:1000], finishedAt=now())
+    mark_active()  # the idle clock starts when the job ends
+
+
+def resume_interrupted_jobs():
+    """Finishes jobs a worker restart (e.g. gpu-vm.sh push) or a reboot cut off.
+    Their work dirs survive on disk; clips already made are reused, not redone."""
+    for work in sorted(p for p in WORK_DIR.iterdir() if p.is_dir()):
+        status_blob = bucket.blob(f"jobs/{work.name}/status.json")
+        if not status_blob.exists():
+            continue
+        state = json.loads(status_blob.download_as_text()).get("state")
+        if state != "running":
+            shutil.rmtree(work, ignore_errors=True)  # finished, failed or cancelled
+            continue
+        job = json.loads(bucket.blob(f"jobs/{work.name}/job.json").download_as_text())
+        log(f"Job {job['id']}: resuming after a worker restart")
+        run_job(job)
 
 
 if __name__ == "__main__":
