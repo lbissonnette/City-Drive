@@ -1,5 +1,5 @@
 // Minimal Cloud Storage client over the JSON API, so the server stays
-// zero-dependency. Auth comes from the metadata server on Cloud Run/GCE, or
+// zero-dependency. accessToken() is shared with compute.js. Auth comes from the metadata server on Cloud Run/GCE, or
 // from `gcloud auth print-access-token` when running locally.
 
 const { execFile } = require('child_process');
@@ -67,4 +67,4 @@ function download(bucket, name, range) {
   return request(`${objectUrl(bucket, name)}?alt=media`, { headers: range ? { Range: range } : {} });
 }
 
-module.exports = { upload, uploadJson, readJson, download };
+module.exports = { accessToken, upload, uploadJson, readJson, download };

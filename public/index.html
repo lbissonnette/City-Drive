@@ -56,7 +56,15 @@
 
     <section id="videoSection" hidden>
       <h2>5. Make a video</h2>
-      <p class="hint">Queues a job for the GPU worker: one AI-generated clip between each pair of consecutive saved frames, stitched into a single video.</p>
+      <p class="hint">Queues a job for the GPU worker: one AI-generated clip between each pair of consecutive saved frames, stitched into a single video. The worker's VM starts on its own when you queue a job and stops itself once it has been idle for a while.</p>
+      <div class="row">
+        <span id="gpuStatus" class="status">GPU worker: checking…</span>
+        <span>
+          <button id="gpuStartBtn" disabled>Start</button>
+          <button id="gpuStopBtn" disabled>Stop</button>
+          <button id="comfyBtn" hidden disabled title="Open ComfyUI on the GPU VM in a new tab, for checking and debugging workflows">ComfyUI</button>
+        </span>
+      </div>
       <label for="videoPrompt">Describe the drive</label>
       <p class="hint">Goes into each clip's prompt in MiniMax H3's own format, along with the timing and any turn between the two frames. Paste a full H3 prompt to use it as is.</p>
       <textarea id="videoPrompt" rows="3"></textarea>

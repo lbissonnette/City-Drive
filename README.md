@@ -87,7 +87,9 @@ serves historic panoramas when given their IDs. The trick is finding those IDs:
 ```
 server.js          Static file server + /api/route (Routes API) + /api/download (saves frames)
                    + /api/video (queues a video job, reports status, streams the result)
+                   + /api/gpu (GPU VM status, start, stop)
 gcs.js             Tiny Cloud Storage client (no dependencies)
+compute.js         Starts/stops the GPU worker VM via the Compute Engine API
 public/index.html  UI
 public/app.js      Map, route sampling, Street View scanning, year selection, preview
 public/style.css

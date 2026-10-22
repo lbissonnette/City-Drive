@@ -24,6 +24,9 @@ const state = {
   carMarker: null,
   savedRun: null,    // { run, frames } from the last save, for the video step
   videoPoll: null,
+  gpuPoll: null,
+  gpuStatus: null,  // last /api/gpu status
+  videoRunning: false,
 };
 
 loadMaps();
@@ -69,6 +72,15 @@ window.initMap = function initMap() {
   if (cfg.maxClipSeconds) $('videoClipSeconds').max = cfg.maxClipSeconds;
   $('videoClipSeconds').oninput = updateVideoInfo;
   $('videoBtn').onclick = makeVideo;
+  $('gpuStartBtn').onclick = () => gpuAction('start');
+  $('gpuStopBtn').onclick = () => gpuAction('stop');
+  const comfy = window.CITY_DRIVE_CONFIG?.comfy;
+  if (comfy) {
+    $('comfyBtn').hidden = false;
+    $('comfyBtn').disabled = !comfy.alwaysOn;
+    $('comfyBtn').onclick = () => window.open(comfy.url, '_blank');
+  }
+  if (window.CITY_DRIVE_CONFIG?.videoEnabled) pollGpu();
 };
 
 // ---------- 1. Route ----------
@@ -438,7 +450,10 @@ async function makeVideo() {
     });
     const data = await resp.json();
     if (!resp.ok) throw new Error(data.error);
+    state.videoRunning = true;
+    if (data.vm?.error) setStatus('gpuStatus', `GPU worker: could not start it (${data.vm.error})`, true);
     pollVideo(data.id);
+    pollGpu();
   } catch (err) {
     setStatus('videoStatus', `Could not queue the video: ${err.message}`, true);
     $('videoBtn').disabled = false;
@@ -459,12 +474,72 @@ async function pollVideo(id) {
     }
     if (s.state === 'done' || s.state === 'failed') {
       $('videoBtn').disabled = false;
+      state.videoRunning = false;
       return;
     }
   } catch (err) {
     setStatus('videoStatus', `Job ${id}: status check failed (${err.message}), retrying`, true);
   }
   state.videoPoll = setTimeout(() => pollVideo(id), 10000);
+}
+
+// ---------- GPU worker VM ----------
+
+const GPU_LABELS = {
+  RUNNING: 'running',
+  TERMINATED: 'stopped',
+  STOPPED: 'stopped',
+  SUSPENDED: 'suspended',
+  PROVISIONING: 'starting…',
+  STAGING: 'starting…',
+  STOPPING: 'stopping…',
+  SUSPENDING: 'suspending…',
+  REPAIRING: 'being repaired by Google Cloud',
+  MISSING: 'not created yet (run scripts/gpu-vm.sh up)',
+};
+const GPU_SETTLED = ['RUNNING', 'TERMINATED', 'STOPPED', 'SUSPENDED', 'MISSING'];
+
+function showGpu(s) {
+  state.gpuStatus = s.status;
+  const where = s.zone ? ` in ${s.zone}` : '';
+  setStatus('gpuStatus', `GPU worker: ${GPU_LABELS[s.status] || s.status.toLowerCase()}${s.status === 'MISSING' ? '' : where}`);
+  $('gpuStartBtn').disabled = !['TERMINATED', 'STOPPED', 'SUSPENDED'].includes(s.status);
+  $('gpuStopBtn').disabled = !['RUNNING', 'PROVISIONING', 'STAGING', 'REPAIRING'].includes(s.status);
+  // With COMFY_URL (a local tunnel) the app doesn't need the VM's status to reach ComfyUI.
+  $('comfyBtn').disabled = s.status !== 'RUNNING' && !window.CITY_DRIVE_CONFIG?.comfy?.alwaysOn;
+}
+
+// Checks often while the VM is changing state, rarely once it has settled.
+async function pollGpu() {
+  clearTimeout(state.gpuPoll);
+  let delay = 60000;
+  try {
+    const resp = await fetch('/api/gpu');
+    const s = await resp.json();
+    if (!resp.ok) throw new Error(s.error);
+    showGpu(s);
+    if (!GPU_SETTLED.includes(s.status)) delay = 5000;
+  } catch (err) {
+    setStatus('gpuStatus', `GPU worker: status unavailable (${err.message})`, true);
+  }
+  state.gpuPoll = setTimeout(pollGpu, delay);
+}
+
+async function gpuAction(action) {
+  if (action === 'stop' && state.videoRunning &&
+      !confirm('A video job may still be running. Stopping the VM loses that job. Stop anyway?')) return;
+  $('gpuStartBtn').disabled = $('gpuStopBtn').disabled = true;
+  try {
+    const resp = await fetch(`/api/gpu/${action}`, { method: 'POST' });
+    const s = await resp.json();
+    if (!resp.ok) throw new Error(s.error);
+    showGpu(s);
+  } catch (err) {
+    setStatus('gpuStatus', `GPU worker: could not ${action} it (${err.message})`, true);
+  }
+  // Refresh soon either way so the buttons match the VM again.
+  clearTimeout(state.gpuPoll);
+  state.gpuPoll = setTimeout(pollGpu, 3000);
 }
 
 function resetScan() {

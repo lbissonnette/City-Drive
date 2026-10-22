@@ -115,6 +115,15 @@ def wait_for_comfy():
             time.sleep(10)
 
 
+def comfy_busy():
+    """True while ComfyUI has prompts running or queued, e.g. from its web UI."""
+    try:
+        q = requests.get(f"{COMFY_URL}/queue", timeout=5).json()
+        return bool(q.get("queue_running") or q.get("queue_pending"))
+    except (requests.RequestException, ValueError):
+        return False
+
+
 def upload_image(path, name):
     with open(path, "rb") as f:
         resp = requests.post(f"{COMFY_URL}/upload/image",
@@ -251,6 +260,8 @@ def main():
     while True:
         job = claim_next_job()
         if not job:
+            if comfy_busy():
+                mark_active()  # someone is running a workflow by hand in ComfyUI's UI
             shutdown_if_idle()
             time.sleep(POLL_SECONDS)
             continue

@@ -52,11 +52,17 @@ jobs:
           # Saved frames live on the instance's in-memory disk, so keep a single
           # instance or /output/ links can land on one that doesn't have them.
           # Who can open the app is set by IAM (see DEPLOY.md), not here.
+          # Direct VPC egress on the default network lets the app's /comfy/ proxy
+          # reach ComfyUI on the GPU VM's internal IP; Google APIs and the internet
+          # still go out directly.
           flags: >-
             --service-account=city-drive-runtime@${{ vars.GCP_PROJECT_ID }}.iam.gserviceaccount.com
             --max-instances=1
             --memory=1Gi
             --timeout=600
+            --network=default
+            --subnet=default
+            --vpc-egress=private-ranges-only
           secrets: |
             GOOGLE_MAPS_API_KEY=google-maps-api-key:latest
           # Empty until gcp-setup.sh has created the bucket; the app then hides the video step.
