@@ -25,7 +25,7 @@ const state = {
   savedRun: null,    // { run, frames } from the last save, for the video step
   videoPoll: null,
   gpuPoll: null,
-  gpuStatus: null,  // last /api/gpu status
+  gpu: null,        // last /api/gpu response
   videoRunning: false,
 };
 
@@ -80,7 +80,11 @@ window.initMap = function initMap() {
     $('comfyBtn').disabled = !comfy.alwaysOn;
     $('comfyBtn').onclick = () => window.open(comfy.url, '_blank');
   }
-  if (window.CITY_DRIVE_CONFIG?.videoEnabled) pollGpu();
+  if (window.CITY_DRIVE_CONFIG?.videoEnabled) {
+    $('gpuPanel').hidden = false;
+    pollGpu();
+    setInterval(showGpuCost, 30000); // keeps the uptime and cost ticking between polls
+  }
 };
 
 // ---------- 1. Route ----------
@@ -451,7 +455,7 @@ async function makeVideo() {
     const data = await resp.json();
     if (!resp.ok) throw new Error(data.error);
     state.videoRunning = true;
-    if (data.vm?.error) setStatus('gpuStatus', `GPU worker: could not start it (${data.vm.error})`, true);
+    if (data.vm?.error) setStatus('gpuStatus', `Could not start it (${data.vm.error})`, true);
     pollVideo(data.id);
     pollGpu();
   } catch (err) {
@@ -500,13 +504,35 @@ const GPU_LABELS = {
 const GPU_SETTLED = ['RUNNING', 'TERMINATED', 'STOPPED', 'SUSPENDED', 'MISSING'];
 
 function showGpu(s) {
-  state.gpuStatus = s.status;
+  state.gpu = s;
   const where = s.zone ? ` in ${s.zone}` : '';
-  setStatus('gpuStatus', `GPU worker: ${GPU_LABELS[s.status] || s.status.toLowerCase()}${s.status === 'MISSING' ? '' : where}`);
+  const label = GPU_LABELS[s.status] || s.status.toLowerCase();
+  setStatus('gpuStatus', `${label[0].toUpperCase()}${label.slice(1)}${s.status === 'MISSING' ? '' : where}`);
+  $('gpuDot').className = `dot${s.status === 'RUNNING' ? ' on' : GPU_SETTLED.includes(s.status) ? '' : ' busy'}`;
+  showGpuCost();
   $('gpuStartBtn').disabled = !['TERMINATED', 'STOPPED', 'SUSPENDED'].includes(s.status);
   $('gpuStopBtn').disabled = !['RUNNING', 'PROVISIONING', 'STAGING', 'REPAIRING'].includes(s.status);
   // With COMFY_URL (a local tunnel) the app doesn't need the VM's status to reach ComfyUI.
   $('comfyBtn').disabled = s.status !== 'RUNNING' && !window.CITY_DRIVE_CONFIG?.comfy?.alwaysOn;
+}
+
+// Estimates from the configured spot price: what this run has cost since the VM
+// last started, or what a stopped VM still costs (its disk).
+function showGpuCost() {
+  const s = state.gpu;
+  const { hourlyUsd = 0, diskMonthlyUsd = 0 } = window.CITY_DRIVE_CONFIG?.gpuCost || {};
+  const usd = (n) => `$${n.toFixed(2)}`;
+  let text = '';
+  if (s?.status === 'RUNNING' && s.startedAt) {
+    const minutes = Math.max(0, (Date.now() - Date.parse(s.startedAt)) / 60000);
+    const up = minutes < 60 ? `${Math.floor(minutes)} min` : `${Math.floor(minutes / 60)} h ${Math.floor(minutes % 60)} min`;
+    text = `Up ${up}, about ${usd((minutes / 60) * hourlyUsd)} so far at ~${usd(hourlyUsd)}/h (spot estimate).`;
+  } else if (['RUNNING', 'PROVISIONING', 'STAGING'].includes(s?.status)) {
+    text = `Billed at ~${usd(hourlyUsd)}/h (spot estimate) while running.`;
+  } else if (['TERMINATED', 'STOPPED', 'SUSPENDED'].includes(s?.status)) {
+    text = `No GPU charges while stopped. The disk still costs ~${usd(diskMonthlyUsd / 30)}/day. Running costs ~${usd(hourlyUsd)}/h.`;
+  }
+  setStatus('gpuCost', text);
 }
 
 // Checks often while the VM is changing state, rarely once it has settled.
@@ -520,7 +546,7 @@ async function pollGpu() {
     showGpu(s);
     if (!GPU_SETTLED.includes(s.status)) delay = 5000;
   } catch (err) {
-    setStatus('gpuStatus', `GPU worker: status unavailable (${err.message})`, true);
+    setStatus('gpuStatus', `Status unavailable (${err.message})`, true);
   }
   state.gpuPoll = setTimeout(pollGpu, delay);
 }
@@ -535,7 +561,7 @@ async function gpuAction(action) {
     if (!resp.ok) throw new Error(s.error);
     showGpu(s);
   } catch (err) {
-    setStatus('gpuStatus', `GPU worker: could not ${action} it (${err.message})`, true);
+    setStatus('gpuStatus', `Could not ${action} it (${err.message})`, true);
   }
   // Refresh soon either way so the buttons match the VM again.
   clearTimeout(state.gpuPoll);
