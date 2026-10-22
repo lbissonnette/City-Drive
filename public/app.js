@@ -80,6 +80,15 @@ window.initMap = function initMap() {
   for (const w of cfg.workflows || []) {
     $('videoWorkflow').add(new Option(`${w.label}: ${w.model}, ${w.steps} steps`, w.name, false, w.name === cfg.defaultWorkflow));
   }
+  const restyle = cfg.restyle || {};
+  for (const era of restyle.eras || []) $('restyleEras').append(new Option(era));
+  if (restyle.maxEraLength) $('restyleEra').maxLength = restyle.maxEraLength;
+  for (const w of restyle.workflows || []) {
+    $('restyleWorkflow').add(new Option(`${w.label}: ${w.model}, ${w.steps} steps`, w.name, false, w.name === restyle.defaultWorkflow));
+  }
+  $('restyleOn').onchange = updateVideoInfo;
+  $('restyleEra').oninput = updateVideoInfo;
+  $('restyleWorkflow').onchange = updateVideoInfo;
   updateVideoInfo();
   $('videoBtn').onclick = makeVideo;
   $('videosRefreshBtn').onclick = loadRecentVideos;
@@ -492,6 +501,12 @@ function videoSpeed() {
   return Math.min(Number(input.max), Math.max(Number(input.min), kmh));
 }
 
+// The "Year style" settings for the job, or null when it's off.
+function videoRestyle() {
+  if (!$('restyleOn').checked) return null;
+  return { era: $('restyleEra').value.trim(), workflow: $('restyleWorkflow').value };
+}
+
 // Same plan the server makes (public/timing.js), for the estimate.
 function videoPlan(saved) {
   const cfg = window.CITY_DRIVE_CONFIG || {};
@@ -512,8 +527,10 @@ function updateVideoInfo() {
   const bySpeed = $('videoTiming').value === 'speed';
   $('videoSpeedRow').hidden = !bySpeed;
   $('videoClipSecondsRow').hidden = bySpeed;
+  const restyle = videoRestyle();
+  $('restyleOptions').hidden = !restyle;
   const saved = state.savedRun;
-  $('videoBtn').disabled = !saved || saved.frames < 2;
+  $('videoBtn').disabled = !saved || saved.frames < 2 || (restyle && !restyle.era);
   if (!saved) return setStatus('videoInfo', 'Save frames first.');
   const { clips: plan, skipped, minMeters } = videoPlan(saved);
   const seconds = Math.round(plan.reduce((t, c) => t + c.seconds, 0));
@@ -529,6 +546,18 @@ function updateVideoInfo() {
     if (skipped) info += ` Skips ${skipped} frame${skipped > 1 ? 's' : ''} less than ${Math.round(minMeters)} m from the previous one (too close for the shortest clip at this speed).`;
     if (short) info += ` ${short} clip${short > 1 ? 's' : ''} with frames very close together will run at the ${min} s minimum, so the drive slows there.`;
     if (long) info += ` ${long} gap${long > 1 ? 's are' : ' is'} too long for ${max} s at this speed, so the drive speeds up there (use more frames or a lower speed).`;
+  }
+  if (restyle && plan.length) {
+    const cfg = window.CITY_DRIVE_CONFIG || {};
+    const w = (cfg.restyle?.workflows || []).find((x) => x.name === restyle.workflow);
+    const frames = plan.length + 1;
+    if (!restyle.era) info += ' Enter an era for the year style.';
+    else if (w) {
+      const seconds = frames * w.secondsPerFrame;
+      const usd = (seconds / 3600) * (cfg.gpuCost?.hourlyUsd || 0);
+      info += ` Restyling ${frames} frames to the ${restyle.era} adds roughly ${formatDuration(seconds)} of GPU time` +
+        `${usd ? ` (about $${usd.toFixed(2)})` : ''} before the clips start.`;
+    }
   }
   setStatus('videoInfo', info);
 }
@@ -548,7 +577,7 @@ async function makeVideo() {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         run: state.savedRun.run, prompt: $('videoPrompt').value, stride: videoStride(), clipSeconds: videoClipSeconds(), speedKmh: videoSpeed(),
-        params: { workflow: $('videoWorkflow').value },
+        restyle: videoRestyle(), params: { workflow: $('videoWorkflow').value },
       }),
     });
     const data = await resp.json();
@@ -573,8 +602,11 @@ async function pollVideo(id) {
     const resp = await fetch(`/api/video/${id}`);
     const s = await resp.json();
     if (!resp.ok) throw new Error(s.error);
-    const progress = s.state === 'running' ? ` (${s.step || 'clips'}: ${s.clipsDone}/${s.clipsTotal})` : '';
-    const timing = s.avgClipSeconds ? `, ${s.avgClipSeconds} s per clip` : '';
+    const restyling = s.step === 'restyling frames';
+    const progress = s.state !== 'running' ? ''
+      : restyling ? ` (${s.step}: ${s.restyleDone}/${s.restyleTotal})` : ` (${s.step || 'clips'}: ${s.clipsDone}/${s.clipsTotal})`;
+    const timing = restyling ? (s.avgRestyleSeconds ? `, ${s.avgRestyleSeconds} s per frame` : '')
+      : s.avgClipSeconds ? `, ${s.avgClipSeconds} s per clip` : '';
     setStatus('videoStatus', `Job ${id}: ${s.state}${progress}${timing}${s.error ? ` – ${s.error}` : ''}`, s.state === 'failed');
     setStatus('videoSettings', describeSettings(s.settings));
     if (s.state === 'done' && !$('videoPlayer').src.endsWith(s.videoUrl)) {
@@ -602,7 +634,8 @@ function describeSettings(s) {
   const files = [...(s.modelFiles || []), ...(s.loras || [])];
   return `${s.model || s.workflow}, ${s.steps} steps, ${s.width}×${s.height} from ${s.sourceSize} Street View, ` +
     `${s.frames} frames at ${s.fps} fps${s.speedKmh ? ` (${s.speedKmh} km/h)` : ''}` +
-    `${files.length ? ` (${files.join(', ')})` : ''}`;
+    `${files.length ? ` (${files.join(', ')})` : ''}` +
+    `${s.restyle ? `. Year style: ${s.restyle.era}, ${s.restyle.model}, ${s.restyle.steps} steps` : ''}`;
 }
 
 async function loadRecentVideos() {
