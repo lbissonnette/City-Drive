@@ -101,8 +101,8 @@ files from [Comfy-Org/MiniMax-H3](https://huggingface.co/Comfy-Org/MiniMax-H3):
 
 | Workflow | Steps | Notes |
 | --- | --- | --- |
-| `minimax_h3_flf2v_turbo` (default) | 8 | Adds the lightx2v 8-step turbo LoRA. Much faster per clip |
-| `minimax_h3_flf2v` | 20 | The template's stock settings (`res_multistep`, simple schedule) |
+| `minimax_h3_flf2v` (default, "Quality") | 20 | The template's stock settings (`res_multistep`, simple schedule) |
+| `minimax_h3_flf2v_turbo` ("Fast") | 8 | Adds the lightx2v 8-step turbo LoRA. ~2.5x faster per clip, but fine detail such as foliage turns to mush |
 | `wan22_flf2v_fast` | 4 | Wan 2.2 14B + lightx2v 4-step LoRAs. Needs `install-wan=true` VM metadata |
 | `wan22_flf2v` | 20 | Wan 2.2 14B, stock two-pass setup |
 
@@ -115,8 +115,19 @@ models were trained around 5 s, so much longer clips may drift or loop and take
 proportionally longer to generate. Clips render on
 H3's native canvas: 768 px short edge, so the 640×640 Street View frames are
 generated at 768×768. H3 also generates an audio track; the worker only decodes
-video for now. Choose a different default with `VIDEO_WORKFLOW` on the app, or per
-job with `"params": {"workflow": "<name>"}` on `/api/video`.
+video for now. Pick the workflow per run with **"Quality"** in the app (`"params":
+{"workflow": "<name>"}` on `/api/video`), or change the default with `VIDEO_WORKFLOW`.
+
+**Source resolution caps quality.** The Street View Static API returns at most
+640×640, so every frame H3 sees is upscaled to its 768 px canvas. More steps help the
+model draw plausible detail, but can't recover detail that isn't in the source. The
+other big lever is spacing: frames far apart leave the model more to make up.
+
+The job's `status.json` (and the app, under the job status) carries `settings`: the
+workflow, model, steps, canvas, frame count and source size. Once the first clip
+starts, the worker adds the model and LoRA files and step count it actually sent to
+ComfyUI, plus `lastClipSeconds`/`avgClipSeconds`. The worker log has the same line
+(`scripts/gpu-vm.sh logs`).
 
 **License:** H3's open weights ship under MiniMax's community license, which is
 reported to leave the US, EU, UK and South Korea out of the self-hosting grant unless

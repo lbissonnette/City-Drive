@@ -117,7 +117,7 @@ MODELS=( # <group> <folder/file> <url>
   "h3 diffusion_models/minimax_h3_fl2va_pruned_int8_convrot.safetensors $H3/diffusion_models/minimax_h3_fl2va_pruned_int8_convrot.safetensors"
   "h3 text_encoders/qwen3vl_32b_minimax_h3_nvfp4_awq.safetensors $H3/text_encoders/qwen3vl_32b_minimax_h3_nvfp4_awq.safetensors"
   "h3 vae/minimax_h3_video_vae_int8_convrot.safetensors $H3/vae/minimax_h3_video_vae_int8_convrot.safetensors"
-  # 8-step turbo LoRA used by the default minimax_h3_flf2v_turbo workflow.
+  # 8-step turbo LoRA used by the "Fast" minimax_h3_flf2v_turbo workflow.
   "h3 loras/minimax_h3_fl2v_turbo_8step_v1.0_comfyui_bf16.safetensors https://huggingface.co/lightx2v/Minimax-h3-Turbo/resolve/main/minimax_h3_fl2v_turbo_8step_v1.0_comfyui_bf16.safetensors"
   # Wan 2.2 14B (Apache 2.0) for the wan22_* workflows. Only seeded when the VM has
   # metadata install-wan=true (~37 GB more).
