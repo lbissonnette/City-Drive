@@ -209,7 +209,7 @@ gc projects add-iam-policy-binding "$PROJECT_ID" \
 # (no create, delete or SSH). It's project-wide because gpu-vm.sh creates the
 # VM after this script runs.
 log "Role $GPU_ROLE for $RUNTIME_SA_NAME"
-gpu_perms=compute.instances.get,compute.instances.list,compute.instances.start,compute.instances.stop,compute.instances.resume
+gpu_perms=compute.instances.get,compute.instances.list,compute.instances.start,compute.instances.stop,compute.instances.resume,compute.zoneOperations.list
 if gc iam roles describe "$GPU_ROLE" >/dev/null 2>&1; then
   gc iam roles update "$GPU_ROLE" --permissions="$gpu_perms" >/dev/null
   echo "Exists, permissions refreshed."
