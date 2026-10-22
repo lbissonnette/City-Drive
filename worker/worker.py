@@ -148,9 +148,12 @@ def fill_template(node, values):
     return node
 
 
-def run_workflow(workflow, out_path):
-    resp = requests.post(f"{COMFY_URL}/prompt",
-                         json={"prompt": workflow, "client_id": CLIENT_ID}, timeout=60)
+def run_workflow(workflow, out_path, ui_workflow=None):
+    body = {"prompt": workflow, "client_id": CLIENT_ID}
+    if ui_workflow:
+        # The editable graph: lets ComfyUI's queue/history open the run as a workflow tab.
+        body["extra_data"] = {"extra_pnginfo": {"workflow": ui_workflow}}
+    resp = requests.post(f"{COMFY_URL}/prompt", json=body, timeout=60)
     if resp.status_code != 200:
         raise RuntimeError(f"ComfyUI rejected the workflow: {resp.text[:2000]}")
     prompt_id = resp.json()["prompt_id"]
@@ -210,6 +213,9 @@ def process(job):
     (work / "frames").mkdir(parents=True, exist_ok=True)
     (work / "clips").mkdir(exist_ok=True)
     workflow_template = json.loads((WORKFLOW_DIR / f"{job['workflow']}.json").read_text())
+    # Optional UI-format twin (scripts/workflow-ui.mjs) with the same placeholders.
+    ui_path = WORKFLOW_DIR / f"{job['workflow']}.ui.json"
+    ui_template = json.loads(ui_path.read_text()) if ui_path.exists() else None
     total = len(job["segments"])
     log(f"Job {job_id}: {total} clips from run {job['run']} with {job['workflow']}")
 
@@ -224,7 +230,7 @@ def process(job):
     for seg in job["segments"]:
         set_status(job, "running", step="generating clips", clipsDone=seg["index"])
         started = time.time()
-        workflow = fill_template(workflow_template, {
+        values = {
             "PROMPT": seg.get("prompt", job["prompt"]),
             "NEGATIVE_PROMPT": job.get("negativePrompt", ""),
             "FIRST_IMAGE": comfy_names[seg["first"]],
@@ -235,9 +241,10 @@ def process(job):
             "FPS": params["fps"],
             "SEED": params["seed"] + seg["index"],
             "OUTPUT_PREFIX": f"city-drive/{job_id}/clip_{seg['index']:04d}",
-        })
+        }
+        ui_workflow = fill_template(ui_template, values) if ui_template else None
         clip = work / "clips" / f"clip_{seg['index']:04d}.mp4"
-        run_workflow(workflow, clip)
+        run_workflow(fill_template(workflow_template, values), clip, ui_workflow)
         clips.append(clip)
         log(f"Job {job_id}: clip {seg['index'] + 1}/{total} in {time.time() - started:.0f}s")
 

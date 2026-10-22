@@ -153,7 +153,18 @@ What `prompts.js` follows from the guide:
    `{{FPS}}`, `{{SEED}}`, and `{{OUTPUT_PREFIX}}` (the save node's filename prefix). The
    workflow must end in a node that saves an `.mp4`/`.webm` (e.g. `SaveVideo`).
 3. Save it as `worker/workflows/<name>.json`, add it to `WORKFLOWS` in `server.js`
-   (frame count, fps, canvas size), and run `./scripts/gpu-vm.sh push`.
+   (frame count, fps, canvas size), and generate its UI-format twin
+   `<name>.ui.json` with `scripts/workflow-ui.mjs` (see below). Then run `./scripts/gpu-vm.sh push`.
+
+### Opening a clip's workflow in ComfyUI
+
+Each workflow has a `<name>.ui.json` twin: the same graph in ComfyUI's editable
+(UI) format, with the same placeholders. The worker fills both and sends the UI one
+as the prompt's `extra_pnginfo.workflow`, so in ComfyUI's queue/history panel
+**Open workflow** (or opening the clip's video) shows the exact graph that made the
+clip: frames, prompt, size and a fixed seed, ready to tweak and re-queue. The twins
+are generated, not hand-edited: after changing an API-format workflow, regenerate
+with `node scripts/workflow-ui.mjs <comfy-url> worker/workflows/<name>.json`.
 
 ## Running it
 
