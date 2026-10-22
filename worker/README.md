@@ -173,9 +173,13 @@ PROJECT_ID=city-drive-123456 ./scripts/gpu-vm.sh tunnel # ComfyUI at http://loca
 PROJECT_ID=city-drive-123456 ./scripts/gpu-vm.sh stop   # stop paying for the GPU
 ```
 
-The first boot installs the NVIDIA driver (Google's installer, one automatic reboot),
-ComfyUI with a CUDA 13 PyTorch build, and ~38 GB of MiniMax H3 weights from
-Hugging Face. Allow 20–30 minutes. Later boots reuse the disk and start in a couple
+The VM boots from an image that already has the NVIDIA driver: `gpu-vm.sh` picks the
+first family in its `IMAGE_CANDIDATES` list that exists (Deep Learning VM, then Ubuntu
+accelerator images), and falls back to plain Ubuntu 22.04 with Google's driver
+installer. Building the driver on the stock Ubuntu 24.04 image fails on its newer
+kernels. Override with `IMAGE_PROJECT` + `IMAGE_FAMILY`. The first boot then installs
+ComfyUI (Python 3.12 via uv, CUDA 13 PyTorch, or 12.8 on a pre-580 driver) and ~38 GB
+of MiniMax H3 weights from Hugging Face. Allow 20–30 minutes. Later boots reuse the disk and start in a couple
 of minutes. When Google reclaims the spot VM it is **stopped**, not deleted; run `up`
 again to bring it back.
 

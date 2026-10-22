@@ -20,6 +20,8 @@
 #   VIDEO_BUCKET   default <PROJECT_ID>-city-drive-video
 #   DISK_SIZE_GB   default 300 (models are ~40 GB; ComfyUI + PyTorch another ~15 GB)
 #   DISK_TYPE      default hyperdisk-balanced (G4 VMs only take Hyperdisk)
+#   IMAGE_PROJECT / IMAGE_FAMILY  boot image. Default: the first family in IMAGE_CANDIDATES
+#                  below that exists, preferring images with the NVIDIA driver preinstalled.
 #   TUNNEL_PORT    default 8188, the local port 'tunnel' listens on
 #   IDLE_SHUTDOWN_MINUTES  default 10. The worker powers the VM off (stopped, not
 #                  deleted) after this long with no jobs. 0 keeps it running.
@@ -42,7 +44,36 @@ COMFY_FIREWALL=city-drive-comfyui
 TUNNEL_PORT="${TUNNEL_PORT:-8188}"
 WORKER_SA="city-drive-gpu-worker@${PROJECT_ID}.iam.gserviceaccount.com"
 
+# project/family pairs, best first. Images with the driver already installed come first:
+# building it with DKMS on the stock Ubuntu 24.04 image fails on its newer kernels.
+IMAGE_CANDIDATES=(
+  deeplearning-platform-release/common-cu129-ubuntu-2404-nvidia-580
+  deeplearning-platform-release/common-cu128-ubuntu-2404-nvidia-570
+  deeplearning-platform-release/common-cu129-ubuntu-2204-nvidia-580
+  deeplearning-platform-release/common-cu128-ubuntu-2204-nvidia-570
+  ubuntu-os-accelerator-images/ubuntu-accelerator-2404-amd64-with-nvidia-580
+  ubuntu-os-accelerator-images/ubuntu-accelerator-2404-amd64-with-nvidia-570
+  # Last resort: plain Ubuntu 22.04 (kernel 6.8), where vm-startup.sh installs the driver.
+  ubuntu-os-cloud/ubuntu-2204-lts
+)
+
 gc() { gcloud --project="$PROJECT_ID" --quiet "$@"; }
+
+pick_image() {
+  if [[ -n "${IMAGE_FAMILY:-}" ]]; then
+    IMAGE_PROJECT="${IMAGE_PROJECT:?Set IMAGE_PROJECT with IMAGE_FAMILY}"
+    return
+  fi
+  local c
+  for c in "${IMAGE_CANDIDATES[@]}"; do
+    if gcloud compute images describe-from-family "${c#*/}" --project="${c%%/*}" >/dev/null 2>&1; then
+      IMAGE_PROJECT="${c%%/*}" IMAGE_FAMILY="${c#*/}"
+      return
+    fi
+  done
+  echo "None of the image families in IMAGE_CANDIDATES exist. Set IMAGE_PROJECT and IMAGE_FAMILY." >&2
+  exit 1
+}
 log() { printf '\n==> %s\n' "$*"; }
 
 if [[ -z "${ZONE:-}" ]]; then
@@ -91,7 +122,8 @@ case "$CMD" in
     comfy_firewall
     status="$(vm_status)"
     if [[ -z "$status" ]]; then
-      log "Creating spot VM $VM ($MACHINE_TYPE) in $ZONE"
+      pick_image
+      log "Creating spot VM $VM ($MACHINE_TYPE) in $ZONE from $IMAGE_PROJECT/$IMAGE_FAMILY"
       gc compute instances create "$VM" \
         --zone="$ZONE" \
         --machine-type="$MACHINE_TYPE" \
@@ -99,12 +131,12 @@ case "$CMD" in
         --provisioning-model=SPOT \
         --instance-termination-action=STOP \
         --maintenance-policy=TERMINATE \
-        --image-family=ubuntu-2404-lts-amd64 --image-project=ubuntu-os-cloud \
+        --image-family="$IMAGE_FAMILY" --image-project="$IMAGE_PROJECT" \
         --boot-disk-size="${DISK_SIZE_GB}GB" --boot-disk-type="$DISK_TYPE" \
         --service-account="$WORKER_SA" --scopes=cloud-platform \
-        --metadata="video-bucket=$VIDEO_BUCKET,idle-shutdown-minutes=$IDLE_SHUTDOWN_MINUTES" \
+        --metadata="video-bucket=$VIDEO_BUCKET,idle-shutdown-minutes=$IDLE_SHUTDOWN_MINUTES,install-nvidia-driver=True" \
         --metadata-from-file=startup-script=worker/vm-startup.sh
-      echo "First boot installs the driver (one reboot), ComfyUI and ~40 GB of models: allow 20-30 minutes."
+      echo "First boot sets up the driver, ComfyUI and ~40 GB of models: allow 20-30 minutes."
     elif [[ "$status" != "RUNNING" ]]; then
       log "Starting $VM ($status)"
       gc compute instances add-tags "$VM" --zone="$ZONE" --tags="$TAG" # VMs created before the ComfyUI firewall rule
