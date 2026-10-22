@@ -106,10 +106,18 @@ files from [Comfy-Org/MiniMax-H3](https://huggingface.co/Comfy-Org/MiniMax-H3):
 | `wan22_flf2v_fast` | 4 | Wan 2.2 14B + lightx2v 4-step LoRAs. Needs `install-wan=true` VM metadata |
 | `wan22_flf2v` | 20 | Wan 2.2 14B, stock two-pass setup |
 
-Clip length is set per run with **"Seconds per clip"** in the app (1–15 s, default 5;
-`clipSeconds` on `/api/video`). The app turns it into the nearest frame count the model
-accepts and writes it to `params.frames` in job.json, which the worker passes to the
-workflow's `{{FRAMES}}`. At the default, H3 clips are 124 frames at 24 fps (~5.2 s;
+Clip length is set per run with **"Clip length"** in the app. By default it comes from a
+**driving speed** (default 30 km/h; `speedKmh` on `/api/video`): Street View panoramas
+are unevenly spaced, so each clip lasts as long as it takes to drive the road between
+its two frames at that speed, which keeps the apparent speed constant. Distances are
+straight lines between consecutive saved frames (summed over any skipped by "Use every
+Nth frame"). Each clip is clamped to 1–15 s, so frames very close together (or the same
+spot twice) run slower, and gaps longer than 15 s of driving run faster; the app lists
+how many clips hit either limit. Each segment in job.json carries its own `frames`
+(and `meters`), which the worker passes to the workflow's `{{FRAMES}}`; `params.frames`
+is the count nearest the average, used by a worker that predates per-segment frames.
+The other mode is a fixed **"Seconds per clip"** (1–15 s, default 5; `clipSeconds`).
+Either way the app turns seconds into the nearest frame count the model accepts. At the default, H3 clips are 124 frames at 24 fps (~5.2 s;
 H3 frame counts sit on a 17k+5 grid) and Wan 2.2 clips are 81 frames at 16 fps. Both
 models were trained around 5 s, so much longer clips may drift or loop and take
 proportionally longer to generate. Clips render on

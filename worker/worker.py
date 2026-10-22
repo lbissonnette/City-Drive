@@ -302,7 +302,8 @@ def process(job):
             "LAST_IMAGE": comfy_names[seg["last"]],
             "WIDTH": params["width"],
             "HEIGHT": params["height"],
-            "FRAMES": params["frames"],
+            # Per-clip length when the job was made with a driving speed.
+            "FRAMES": seg.get("frames", params["frames"]),
             "FPS": params["fps"],
             "SEED": params["seed"] + seg["index"],
             "OUTPUT_PREFIX": f"city-drive/{job_id}/clip_{seg['index']:04d}",

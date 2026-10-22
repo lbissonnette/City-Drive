@@ -17,6 +17,7 @@ section { padding: 12px 0; border-top: 1px solid #e5e5e5; }
 .status.error { color: #b00020; }
 .row { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin: 6px 0; }
 .row.buttons { justify-content: flex-start; }
+.row[hidden] { display: none; }
 input[type=number] { width: 64px; }
 #videoWorkflow { max-width: 65%; }
 #videoSettings { overflow-wrap: anywhere; }
