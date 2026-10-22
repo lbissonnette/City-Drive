@@ -50,6 +50,16 @@ if [[ -z "${ZONE:-}" ]]; then
   [[ -n "$ZONE" ]] || { echo "No zone in $REGION offers $MACHINE_TYPE. Set REGION or ZONE." >&2; exit 1; }
 fi
 
+# Both come from scripts/gcp-setup.sh; say so instead of failing deep inside gcloud.
+preflight() {
+  if ! gcloud storage buckets describe "gs://$VIDEO_BUCKET" --project="$PROJECT_ID" >/dev/null 2>&1 \
+    || ! gc iam service-accounts describe "$WORKER_SA" >/dev/null 2>&1; then
+    echo "gs://$VIDEO_BUCKET or the city-drive-gpu-worker service account doesn't exist yet." >&2
+    echo "Run the setup script (safe to re-run) first: PROJECT_ID=$PROJECT_ID ./scripts/gcp-setup.sh" >&2
+    exit 1
+  fi
+}
+
 push_worker() {
   log "Uploading worker code to gs://$VIDEO_BUCKET/worker/"
   gcloud storage rsync --project="$PROJECT_ID" --recursive --delete-unmatched-destination-objects \
@@ -60,6 +70,7 @@ vm_status() { gc compute instances describe "$VM" --zone="$ZONE" --format='value
 
 case "$CMD" in
   up)
+    preflight
     push_worker
     status="$(vm_status)"
     if [[ -z "$status" ]]; then
@@ -82,12 +93,15 @@ case "$CMD" in
         --metadata="video-bucket=$VIDEO_BUCKET,idle-shutdown-minutes=$IDLE_SHUTDOWN_MINUTES" --metadata-from-file=startup-script=worker/vm-startup.sh
       gc compute instances start "$VM" --zone="$ZONE"
     else
-      log "$VM is already running. Use 'push' to restart the worker with new code."
-      # Starting the VM also restarts the idle clock; a running VM keeps its own.
+      log "$VM is already running; updating its startup script and re-running it"
+      gc compute instances add-metadata "$VM" --zone="$ZONE" \
+        --metadata="video-bucket=$VIDEO_BUCKET,idle-shutdown-minutes=$IDLE_SHUTDOWN_MINUTES" --metadata-from-file=startup-script=worker/vm-startup.sh
+      gc compute ssh "$VM" --zone="$ZONE" --command='sudo google_metadata_script_runner startup'
     fi
     echo "Follow progress: PROJECT_ID=$PROJECT_ID ./scripts/gpu-vm.sh logs"
     ;;
   push)
+    preflight
     push_worker
     gc compute ssh "$VM" --zone="$ZONE" --command="sudo gcloud storage rsync --recursive --delete-unmatched-destination-objects gs://$VIDEO_BUCKET/worker /opt/city-drive-worker && sudo systemctl restart city-drive-worker"
     ;;

@@ -3,7 +3,7 @@
 Plot a drive on a map, pull Google Street View imagery along it (optionally from a
 chosen historic year), and save the frames. A GPU worker then turns the frames into a
 video of the drive, generating a ~5 s clip between each pair of frames with an
-image-to-video model in ComfyUI and stitching them together (see
+MiniMax H3 in ComfyUI and stitching them together (see
 [worker/README.md](worker/README.md)).
 
 ## Run it

@@ -2,11 +2,12 @@
 # Startup script for the City Drive GPU worker VM (Ubuntu 24.04, G4 / RTX PRO 6000).
 # scripts/gpu-vm.sh passes it as the VM's startup-script, so it runs as root on
 # every boot. Each step skips work that's already done, so after the first boot
-# (driver install, ~40 GB of model downloads) a restart just starts the services.
+# (driver install, ~38 GB of model downloads) a restart just starts the services.
 #
 # Reads instance metadata:
 #   video-bucket            the bucket shared with the app (worker code lives in gs://<bucket>/worker/)
 #   idle-shutdown-minutes   power off after this long with no jobs (default 10, 0 = never)
+#   install-wan             "true" to also download Wan 2.2 for the wan22_* workflows
 #
 # Log: /var/log/city-drive-startup.log (also in the serial console).
 
@@ -57,17 +58,16 @@ if [[ ! -d "$COMFY/.git" ]]; then
 fi
 if [[ ! -f "$STATE/comfy-deps-done" ]]; then
   python3 -m venv "$COMFY/venv"
-  # Blackwell (RTX PRO 6000) needs a CUDA 12.8+ build of PyTorch.
+  # ComfyUI wants a cu130+ PyTorch on RTX 20-series and newer (Blackwell included).
   "$COMFY/venv/bin/pip" install --upgrade pip
-  "$COMFY/venv/bin/pip" install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu128
+  "$COMFY/venv/bin/pip" install torch torchvision torchaudio --extra-index-url https://download.pytorch.org/whl/cu130
   "$COMFY/venv/bin/pip" install -r "$COMFY/requirements.txt"
   # The worker shares this venv.
   "$COMFY/venv/bin/pip" install google-cloud-storage requests
   touch "$STATE/comfy-deps-done"
 fi
 
-# --- 4. Models (Wan 2.2 14B first+last frame to video) -----------------------------
-HF=https://huggingface.co/Comfy-Org/Wan_2.2_ComfyUI_Repackaged/resolve/main/split_files
+# --- 4. Models ----------------------------------------------------------------------
 fetch() { # fetch <url> <dest>; resumable, skipped once present
   local url="$1" dest="$2"
   [[ -s "$dest" ]] && return 0
@@ -76,6 +76,21 @@ fetch() { # fetch <url> <dest>; resumable, skipped once present
   mv "$dest.part" "$dest"
 }
 M="$COMFY/models"
+
+# MiniMax H3 first+last frame to video (the default). Files and URLs are the ones
+# ComfyUI's own video_minimax_h3_i2v template uses (~38 GB).
+H3=https://huggingface.co/Comfy-Org/MiniMax-H3/resolve/main
+fetch "$H3/diffusion_models/minimax_h3_fl2va_pruned_int8_convrot.safetensors" "$M/diffusion_models/minimax_h3_fl2va_pruned_int8_convrot.safetensors"
+fetch "$H3/text_encoders/qwen3vl_32b_minimax_h3_nvfp4_awq.safetensors"        "$M/text_encoders/qwen3vl_32b_minimax_h3_nvfp4_awq.safetensors"
+fetch "$H3/vae/minimax_h3_video_vae_int8_convrot.safetensors"                 "$M/vae/minimax_h3_video_vae_int8_convrot.safetensors"
+# 8-step turbo LoRA used by the default minimax_h3_flf2v_turbo workflow.
+fetch "https://huggingface.co/lightx2v/Minimax-h3-Turbo/resolve/main/minimax_h3_fl2v_turbo_8step_v1.0_comfyui_bf16.safetensors" \
+  "$M/loras/minimax_h3_fl2v_turbo_8step_v1.0_comfyui_bf16.safetensors"
+
+# Wan 2.2 14B (Apache 2.0) for the wan22_* workflows. Off unless the VM has
+# metadata install-wan=true (~37 GB more).
+if [[ "$(metadata install-wan)" == "true" ]]; then
+HF=https://huggingface.co/Comfy-Org/Wan_2.2_ComfyUI_Repackaged/resolve/main/split_files
 fetch "$HF/diffusion_models/wan2.2_i2v_high_noise_14B_fp8_scaled.safetensors" "$M/diffusion_models/wan2.2_i2v_high_noise_14B_fp8_scaled.safetensors"
 fetch "$HF/diffusion_models/wan2.2_i2v_low_noise_14B_fp8_scaled.safetensors"  "$M/diffusion_models/wan2.2_i2v_low_noise_14B_fp8_scaled.safetensors"
 fetch "$HF/text_encoders/umt5_xxl_fp8_e4m3fn_scaled.safetensors"              "$M/text_encoders/umt5_xxl_fp8_e4m3fn_scaled.safetensors"
@@ -83,6 +98,7 @@ fetch "$HF/vae/wan_2.1_vae.safetensors"                                       "$
 # 4-step distillation LoRAs used by the default "fast" workflow.
 fetch "$HF/loras/wan2.2_i2v_lightx2v_4steps_lora_v1_high_noise.safetensors"    "$M/loras/wan2.2_i2v_lightx2v_4steps_lora_v1_high_noise.safetensors"
 fetch "$HF/loras/wan2.2_i2v_lightx2v_4steps_lora_v1_low_noise.safetensors"     "$M/loras/wan2.2_i2v_lightx2v_4steps_lora_v1_low_noise.safetensors"
+fi
 
 # --- 5. Worker code (pushed to the bucket by scripts/gpu-vm.sh) ------------------------
 command -v gcloud >/dev/null || snap install google-cloud-cli --classic

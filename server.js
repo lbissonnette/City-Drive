@@ -31,6 +31,17 @@ const DEFAULT_PROMPT =
   'continuous forward motion, realistic, natural lighting';
 const DEFAULT_NEGATIVE_PROMPT =
   'static, frozen, camera shake, jump cut, blurry, distorted, warped buildings, text, watermark, people morphing';
+// ComfyUI workflow templates in worker/workflows/ and the clip shape each model
+// was trained on. canvas() maps the saved image size to the generation size.
+const WORKFLOWS = {
+  // MiniMax H3: 24 fps, frame counts on a 17k+5 grid (124 = ~5.2 s), 768 px short edge.
+  minimax_h3_flf2v_turbo: { frames: 124, fps: 24, canvas: h3Canvas },
+  minimax_h3_flf2v: { frames: 124, fps: 24, canvas: h3Canvas },
+  // Wan 2.2: 81 frames at 16 fps (~5 s), any size in multiples of 16.
+  wan22_flf2v_fast: { frames: 81, fps: 16, canvas: (w, h) => [w, h] },
+  wan22_flf2v: { frames: 81, fps: 16, canvas: (w, h) => [w, h] },
+};
+const DEFAULT_WORKFLOW = process.env.VIDEO_WORKFLOW || 'minimax_h3_flf2v_turbo';
 
 if (!API_KEY) {
   console.error('Missing GOOGLE_MAPS_API_KEY. Copy .env.example to .env and fill it in.');
@@ -49,7 +60,10 @@ const server = http.createServer(async (req, res) => {
   try {
     const url = new URL(req.url, `http://${req.headers.host}`);
     if (req.method === 'GET' && url.pathname === '/config.js') {
-      const config = { apiKey: API_KEY, videoEnabled: Boolean(VIDEO_BUCKET), defaultPrompt: DEFAULT_PROMPT };
+      const { frames, fps } = WORKFLOWS[DEFAULT_WORKFLOW];
+      const config = {
+        apiKey: API_KEY, videoEnabled: Boolean(VIDEO_BUCKET), defaultPrompt: DEFAULT_PROMPT, clipSeconds: frames / fps,
+      };
       return send(res, 200, `window.CITY_DRIVE_CONFIG = ${JSON.stringify(config)};`, MIME['.js']);
     }
     if (req.method === 'POST' && url.pathname === '/api/route') {
@@ -185,7 +199,10 @@ async function createVideoJob({ run, prompt, negativePrompt, stride = 1, maxClip
   if (maxClips) images = images.slice(0, Math.max(1, Number(maxClips)) + 1);
   if (images.length < 2) throw httpError(400, 'Need at least two saved frames to make a video');
 
-  const [width, height] = (manifest.size || '640x640').split('x').map(Number);
+  const workflow = params.workflow || DEFAULT_WORKFLOW;
+  const preset = WORKFLOWS[workflow];
+  if (!preset) throw httpError(400, `Unknown workflow ${workflow}`);
+  const [width, height] = preset.canvas(...(manifest.size || '640x640').split('x').map(Number));
   const id = `${new Date().toISOString().replace(/[-:.TZ]/g, '').slice(0, 14)}-${crypto.randomBytes(3).toString('hex')}`;
   const job = {
     version: 1,
@@ -193,15 +210,14 @@ async function createVideoJob({ run, prompt, negativePrompt, stride = 1, maxClip
     createdAt: new Date().toISOString(),
     run,
     label: manifest.label,
-    workflow: params.workflow || 'wan22_flf2v_fast',
+    workflow,
     prompt: prompt || DEFAULT_PROMPT,
     negativePrompt: negativePrompt || DEFAULT_NEGATIVE_PROMPT,
     params: {
       width,
       height,
-      // 81 frames at 16 fps is the ~5 s clip Wan was trained on.
-      frames: Number(params.frames) || 81,
-      fps: Number(params.fps) || 16,
+      frames: Number(params.frames) || preset.frames,
+      fps: Number(params.fps) || preset.fps,
       seed: Number.isInteger(params.seed) ? params.seed : crypto.randomInt(2 ** 31),
     },
     images,
@@ -234,6 +250,15 @@ async function streamVideo(req, res, id) {
   }
   res.writeHead(upstream.status, headers);
   Readable.fromWeb(upstream.body).pipe(res);
+}
+
+// H3's native canvas: 768 px short edge, at most 768x1344 pixels, multiples of 32
+// (mirrors adapt_canvas in ComfyUI's nodes_minimax_h3.py).
+function h3Canvas(width, height) {
+  const ratio = width / height;
+  let [w, h] = ratio >= 1 ? [768 * ratio, 768] : [768, 768 / ratio];
+  const scale = Math.min(1, Math.sqrt((768 * 1344) / (w * h)));
+  return [w, h].map((v) => Math.max(32, Math.round((v * scale) / 32) * 32));
 }
 
 function serveFile(res, root, relPath) {
