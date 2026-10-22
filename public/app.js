@@ -69,6 +69,12 @@ window.initMap = function initMap() {
   $('videoBtn').onclick = makeVideo;
   $('gpuStartBtn').onclick = () => gpuAction('start');
   $('gpuStopBtn').onclick = () => gpuAction('stop');
+  const comfy = window.CITY_DRIVE_CONFIG?.comfy;
+  if (comfy) {
+    $('comfyBtn').hidden = false;
+    $('comfyBtn').disabled = !comfy.alwaysOn;
+    $('comfyBtn').onclick = () => window.open(comfy.url, '_blank');
+  }
   if (window.CITY_DRIVE_CONFIG?.videoEnabled) pollGpu();
 };
 
@@ -486,6 +492,8 @@ function showGpu(s) {
   setStatus('gpuStatus', `GPU worker: ${GPU_LABELS[s.status] || s.status.toLowerCase()}${s.status === 'MISSING' ? '' : where}`);
   $('gpuStartBtn').disabled = !['TERMINATED', 'STOPPED', 'SUSPENDED'].includes(s.status);
   $('gpuStopBtn').disabled = !['RUNNING', 'PROVISIONING', 'STAGING', 'REPAIRING'].includes(s.status);
+  // With COMFY_URL (a local tunnel) the app doesn't need the VM's status to reach ComfyUI.
+  $('comfyBtn').disabled = s.status !== 'RUNNING' && !window.CITY_DRIVE_CONFIG?.comfy?.alwaysOn;
 }
 
 // Checks often while the VM is changing state, rarely once it has settled.

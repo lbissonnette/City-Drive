@@ -122,6 +122,7 @@ preemptible/spot variant in your region) before the first `up`.
 PROJECT_ID=city-drive-123456 ./scripts/gpu-vm.sh up     # create or start the VM
 PROJECT_ID=city-drive-123456 ./scripts/gpu-vm.sh logs   # watch setup, then the worker
 PROJECT_ID=city-drive-123456 ./scripts/gpu-vm.sh push   # after changing worker code/workflows
+PROJECT_ID=city-drive-123456 ./scripts/gpu-vm.sh tunnel # ComfyUI at http://localhost:8188 without the app
 PROJECT_ID=city-drive-123456 ./scripts/gpu-vm.sh stop   # stop paying for the GPU
 ```
 
@@ -146,6 +147,26 @@ needs the `cityDriveGpuControl` role `gcp-setup.sh` grants the app's runtime ser
 account (re-run the setup script if you set up before this existed). Creating the VM,
 `push` and `logs` still go through `gpu-vm.sh`. Locally, set `GCP_PROJECT_ID` in
 `.env`; your gcloud login needs the same start/stop permissions.
+
+### Opening ComfyUI for debugging
+
+While the VM is running, the **ComfyUI** button in the app's video step opens
+ComfyUI's own web UI in a new tab (the app proxies `/comfy/` to the VM's port 8188).
+You can load a workflow from `worker/workflows/`, watch the worker's jobs in the queue,
+and run things by hand. Prompts you queue there keep the VM from idling off.
+
+How it's wired: the Cloud Run service uses Direct VPC egress on the `default` network
+(`deploy.yml`), and `gpu-vm.sh up` adds the `city-drive-comfyui` firewall rule
+(tcp:8188 from the region's default subnet) and tags the VM for it. ComfyUI has no
+login of its own; it is only reachable through the app, which Cloud Run keeps private.
+Keep the app private if you use this, since anyone who can open the app can drive
+ComfyUI. If you set up before this existed, re-run `gcp-setup.sh` (the deployer needs
+`roles/compute.networkViewer`) and `gpu-vm.sh up` (firewall, tag, ComfyUI listening
+on the VPC), then redeploy.
+
+Without the app, `PROJECT_ID=... ./scripts/gpu-vm.sh tunnel` forwards ComfyUI over
+SSH to http://localhost:8188. To use the tunnel from a locally running app, set
+`COMFY_URL=http://localhost:8188` in `.env`; the button then always goes there.
 
 To run the app locally against the bucket, set `VIDEO_BUCKET` in `.env`; the server
 uses your `gcloud auth login` credentials for Cloud Storage.

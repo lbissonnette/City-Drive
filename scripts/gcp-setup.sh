@@ -128,7 +128,9 @@ for sa in "$DEPLOY_SA" "$RUNTIME_SA" "$WORKER_SA"; do
 done
 
 log "Granting roles to the deployer"
-for role in roles/run.admin roles/artifactregistry.writer; do
+# compute.networkViewer: deploying with Direct VPC egress (so the app can reach
+# ComfyUI on the GPU VM) needs to read the default network.
+for role in roles/run.admin roles/artifactregistry.writer roles/compute.networkViewer; do
   gc projects add-iam-policy-binding "$PROJECT_ID" \
     --member="serviceAccount:$DEPLOY_SA" --role="$role" --condition=None >/dev/null
   echo "$role"

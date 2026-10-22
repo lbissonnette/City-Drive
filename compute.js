@@ -46,15 +46,16 @@ async function findZone() {
 
 const instanceUrl = async (z) => `${API}/projects/${await project()}/zones/${z}/instances/${VM_NAME}`;
 
-// { name, zone, status } where status is a GCE instance status (RUNNING,
-// TERMINATED = stopped, STAGING, STOPPING, ...) or MISSING if gpu-vm.sh up
-// hasn't created the VM yet.
+// { name, zone, status, internalIp } where status is a GCE instance status
+// (RUNNING, TERMINATED = stopped, STAGING, STOPPING, ...) or MISSING if
+// gpu-vm.sh up hasn't created the VM yet. internalIp is the VM's VPC address,
+// which the /comfy/ proxy in server.js connects to.
 async function status() {
   const z = await findZone();
   if (!z) return { name: VM_NAME, zone: null, status: 'MISSING' };
   try {
     const vm = await request(await instanceUrl(z));
-    return { name: VM_NAME, zone: z, status: vm.status };
+    return { name: VM_NAME, zone: z, status: vm.status, internalIp: vm.networkInterfaces?.[0]?.networkIP || null };
   } catch (err) {
     if (err.status !== 404) throw err;
     zone = process.env.GPU_VM_ZONE || ''; // deleted or recreated elsewhere
