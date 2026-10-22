@@ -213,6 +213,14 @@ ComfyUI. If you set up before this existed, re-run `gcp-setup.sh` (the deployer 
 `roles/compute.networkViewer`) and `gpu-vm.sh up` (firewall, tag, ComfyUI listening
 on the VPC), then redeploy.
 
+The app finds the VM's internal IP through the Compute API, with the same
+`cityDriveGpuControl` role as Start/Stop. If that lookup fails (a 403 means
+`gcp-setup.sh` hasn't been re-run), the button stays clickable and the page it opens
+says why. To skip the lookup, set the repo variable `GCP_COMFY_URL` to
+`http://<internal IP>:8188` and redeploy; the IP survives stop/start and changes only
+if the VM is recreated:
+`gcloud compute instances describe city-drive-gpu --zone=<zone> --format='value(networkInterfaces[0].networkIP)'`.
+
 Without the app, `PROJECT_ID=... ./scripts/gpu-vm.sh tunnel` forwards ComfyUI over
 SSH to http://localhost:8188. To use the tunnel from a locally running app, set
 `COMFY_URL=http://localhost:8188` in `.env`; the button then always goes there.

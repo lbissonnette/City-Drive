@@ -5,7 +5,9 @@
 // On Cloud Run the app reaches the VM's internal IP on port 8188 over Direct
 // VPC egress (see .github/workflows/deploy.yml); the IP comes from the Compute
 // API via compute.js. Locally, open an SSH tunnel with `scripts/gpu-vm.sh
-// tunnel` and set COMFY_URL=http://localhost:8188.
+// tunnel` and set COMFY_URL=http://localhost:8188. COMFY_URL also works on Cloud
+// Run (repo variable GCP_COMFY_URL, http://<VM internal IP>:8188) to skip the
+// lookup, e.g. when the runtime service account can't read the VM.
 //
 // Access control is the app's: Cloud Run only lets in people with run.invoker.
 
@@ -22,7 +24,15 @@ let cached = { target: null, expires: 0 };
 async function target() {
   if (COMFY_URL) return new URL(COMFY_URL);
   if (cached.target && Date.now() < cached.expires) return cached.target;
-  const s = await gpu.status();
+  let s;
+  try {
+    s = await gpu.status();
+  } catch (err) {
+    if (err.status !== 403) throw err;
+    throw Object.assign(new Error(`The app isn't allowed to look up the GPU VM's address (${err.message}). ` +
+      'Re-run scripts/gcp-setup.sh to grant it, or set the GCP_COMFY_URL repo variable to ' +
+      'http://<VM internal IP>:8188 to skip the lookup.'), { status: 503 });
+  }
   if (s.status !== 'RUNNING' || !s.internalIp) {
     const state = s.status === 'MISSING' ? 'not created yet' : `not running (${s.status.toLowerCase()})`;
     throw Object.assign(new Error(`The GPU VM is ${state}. Start it from the app's video step, then reload this page.`), { status: 503 });

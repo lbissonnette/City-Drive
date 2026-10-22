@@ -547,6 +547,8 @@ async function pollGpu() {
     if (!GPU_SETTLED.includes(s.status)) delay = 5000;
   } catch (err) {
     setStatus('gpuStatus', `Status unavailable (${err.message})`, true);
+    // The VM may well be up; let the proxy try, and its page says what's wrong if not.
+    $('comfyBtn').disabled = false;
   }
   state.gpuPoll = setTimeout(pollGpu, delay);
 }
