@@ -5,7 +5,8 @@
 # (driver install, ~40 GB of model downloads) a restart just starts the services.
 #
 # Reads instance metadata:
-#   video-bucket   the bucket shared with the app (worker code lives in gs://<bucket>/worker/)
+#   video-bucket            the bucket shared with the app (worker code lives in gs://<bucket>/worker/)
+#   idle-shutdown-minutes   power off after this long with no jobs (default 30, 0 = never)
 #
 # Log: /var/log/city-drive-startup.log (also in the serial console).
 
@@ -18,6 +19,8 @@ metadata() {
 }
 BUCKET="$(metadata video-bucket)"
 [[ -n "$BUCKET" ]] || { echo "video-bucket metadata is not set" >&2; exit 1; }
+IDLE_SHUTDOWN_MINUTES="$(metadata idle-shutdown-minutes)"
+IDLE_SHUTDOWN_MINUTES="${IDLE_SHUTDOWN_MINUTES:-30}"
 
 STATE=/var/lib/city-drive
 COMFY=/opt/ComfyUI
@@ -111,6 +114,7 @@ Wants=comfyui.service
 WorkingDirectory=$WORKER
 Environment=VIDEO_BUCKET=$BUCKET
 Environment=PYTHONUNBUFFERED=1
+Environment=IDLE_SHUTDOWN_MINUTES=$IDLE_SHUTDOWN_MINUTES
 ExecStart=$COMFY/venv/bin/python $WORKER/worker.py
 Restart=always
 RestartSec=10

@@ -116,7 +116,14 @@ Hugging Face. Allow 20–30 minutes. Later boots reuse the disk and start in a c
 of minutes. When Google reclaims the spot VM it is **stopped**, not deleted; run `up`
 again to bring it back.
 
-The VM costs money while it runs, even when idle. Stop it when you're done.
+The VM costs money while it runs, so it **stops itself when idle**: once no job has
+run or been queued for 30 minutes, the worker powers it off. That leaves it in the
+same stopped state as `gpu-vm.sh stop` (no GPU billing, disk and models kept), and
+`up` brings it back in a couple of minutes. Change the window with
+`IDLE_SHUTDOWN_MINUTES=60 ./scripts/gpu-vm.sh up`, or set it to `0` to keep the VM
+running until you stop it. The window applies from boot too, so a VM whose setup or
+ComfyUI never comes up still stops once the worker is running. It does not cover a
+first boot that fails before the worker is installed; check `logs` then.
 
 To run the app locally against the bucket, set `VIDEO_BUCKET` in `.env`; the server
 uses your `gcloud auth login` credentials for Cloud Storage.
