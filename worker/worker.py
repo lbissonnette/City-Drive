@@ -225,7 +225,7 @@ def process(job):
         set_status(job, "running", step="generating clips", clipsDone=seg["index"])
         started = time.time()
         workflow = fill_template(workflow_template, {
-            "PROMPT": job["prompt"],
+            "PROMPT": seg.get("prompt", job["prompt"]),
             "NEGATIVE_PROMPT": job.get("negativePrompt", ""),
             "FIRST_IMAGE": comfy_names[seg["first"]],
             "LAST_IMAGE": comfy_names[seg["last"]],

@@ -66,6 +66,11 @@ window.initMap = function initMap() {
   $('videoSection').hidden = !window.CITY_DRIVE_CONFIG?.videoEnabled;
   $('videoPrompt').value = window.CITY_DRIVE_CONFIG?.defaultPrompt || '';
   $('videoStride').oninput = updateVideoInfo;
+  const cfg = window.CITY_DRIVE_CONFIG || {};
+  if (cfg.clipSeconds) $('videoClipSeconds').value = cfg.clipSeconds;
+  if (cfg.minClipSeconds) $('videoClipSeconds').min = cfg.minClipSeconds;
+  if (cfg.maxClipSeconds) $('videoClipSeconds').max = cfg.maxClipSeconds;
+  $('videoClipSeconds').oninput = updateVideoInfo;
   $('videoBtn').onclick = makeVideo;
   $('gpuStartBtn').onclick = () => gpuAction('start');
   $('gpuStopBtn').onclick = () => gpuAction('stop');
@@ -415,6 +420,12 @@ function videoStride() {
   return Math.max(1, Math.floor(Number($('videoStride').value) || 1));
 }
 
+function videoClipSeconds() {
+  const input = $('videoClipSeconds');
+  const seconds = Number(input.value) || window.CITY_DRIVE_CONFIG?.clipSeconds || 5;
+  return Math.min(Number(input.max), Math.max(Number(input.min), seconds));
+}
+
 function updateVideoInfo() {
   const saved = state.savedRun;
   $('videoBtn').disabled = !saved || saved.frames < 2;
@@ -422,7 +433,7 @@ function updateVideoInfo() {
   // Matches the server's selection: every Nth frame plus the last one.
   const used = Math.ceil(saved.frames / videoStride()) + ((saved.frames - 1) % videoStride() ? 1 : 0);
   const clips = Math.max(0, used - 1);
-  setStatus('videoInfo', `${clips} clips from run ${saved.run}, about ${Math.round(clips * (window.CITY_DRIVE_CONFIG?.clipSeconds || 5))} s of video.`);
+  setStatus('videoInfo', `${clips} clips from run ${saved.run}, about ${Math.round(clips * videoClipSeconds())} s of video.`);
 }
 
 async function makeVideo() {
@@ -433,7 +444,9 @@ async function makeVideo() {
     const resp = await fetch('/api/video', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ run: state.savedRun.run, prompt: $('videoPrompt').value, stride: videoStride() }),
+      body: JSON.stringify({
+        run: state.savedRun.run, prompt: $('videoPrompt').value, stride: videoStride(), clipSeconds: videoClipSeconds(),
+      }),
     });
     const data = await resp.json();
     if (!resp.ok) throw new Error(data.error);

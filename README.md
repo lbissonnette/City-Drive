@@ -2,7 +2,7 @@
 
 Plot a drive on a map, pull Google Street View imagery along it (optionally from a
 chosen historic year), and save the frames. A GPU worker then turns the frames into a
-video of the drive, generating a ~5 s clip between each pair of frames with
+video of the drive, generating a short clip (5 s by default, adjustable per run) between each pair of frames with
 MiniMax H3 in ComfyUI and stitching them together (see
 [worker/README.md](worker/README.md)).
 
@@ -50,9 +50,9 @@ script and a GitHub Actions workflow that deploys on every push to `main`.
    containing `frame_0001.jpg…` and a `manifest.json` with each frame's panorama ID,
    capture date, heading and coordinates, ready for the video stage. With
    `VIDEO_BUCKET` set they're also copied to Cloud Storage.
-5. **Make a video** (only shown when `VIDEO_BUCKET` is set). Edit the prompt, optionally
-   use every Nth frame, and click *Make video*. The app writes a job doc to the bucket,
-   the GPU worker picks it up, and the finished video plays in the panel.
+5. **Make a video** (only shown when `VIDEO_BUCKET` is set). Describe the drive (the
+   app wraps it in MiniMax H3's prompt format for each clip), optionally use every Nth
+   frame, and click *Make video*. The app writes a job doc to the bucket, the GPU worker picks it up, and the finished video plays in the panel.
 
 ## How historic imagery works (and its limits)
 
