@@ -56,7 +56,15 @@ for its clip, built by [`prompts.js`](../prompts.js) (see [Prompts](#prompts) be
 the worker falls back to the job's `prompt` when a segment has none.
 
 `status.json` goes `queued` → `running` (with `step` and `clipsDone`/`clipsTotal`)
-→ `done` or `failed` (with `error`). The app polls it and plays the video when done.
+→ `done`, `failed` (with `error`) or `cancelled`. The app polls it and plays the video
+when done. Its **Recent videos** list (`GET /api/videos`) reads the newest jobs from the
+bucket, so a job can be reopened after the page was closed.
+
+**Cancelling** (`POST /api/video/<id>/cancel`, the Cancel button in that list) writes
+`jobs/<id>/cancel.json`. A queued job also loses its queue marker and is marked
+`cancelled` at once. For a running job, the worker checks for the flag before each clip
+and every ~10 s while one generates; it then drops the prompt from ComfyUI's queue,
+interrupts it, discards the clips and marks the job `cancelled`.
 
 ### Per job, the worker
 

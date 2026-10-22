@@ -91,6 +91,9 @@ const server = http.createServer(async (req, res) => {
     if (req.method === 'POST' && url.pathname === '/api/download') {
       return sendJson(res, 200, await downloadFrames(await readJson(req)));
     }
+    if (req.method === 'GET' && url.pathname === '/api/videos') {
+      return sendJson(res, 200, await recentVideos(Number(url.searchParams.get('limit')) || 20));
+    }
     if (req.method === 'POST' && url.pathname === '/api/video') {
       return sendJson(res, 200, await createVideoJob(await readJson(req)));
     }
@@ -100,6 +103,8 @@ const server = http.createServer(async (req, res) => {
       if (req.method === 'POST' && url.pathname === '/api/gpu/start') return sendJson(res, 200, await gpu.start());
       if (req.method === 'POST' && url.pathname === '/api/gpu/stop') return sendJson(res, 200, await gpu.stop());
     }
+    const cancelMatch = url.pathname.match(/^\/api\/video\/([\w-]+)\/cancel$/);
+    if (req.method === 'POST' && cancelMatch) return sendJson(res, 200, await cancelVideo(cancelMatch[1]));
     const videoMatch = url.pathname.match(/^\/api\/video\/([\w-]+)(\/drive\.mp4)?$/);
     if (req.method === 'GET' && videoMatch) {
       return videoMatch[2] ? streamVideo(req, res, videoMatch[1]) : sendJson(res, 200, await videoStatus(videoMatch[1]));
@@ -297,6 +302,60 @@ async function createVideoJob({ run, prompt, negativePrompt, stride = 1, maxClip
 // (5 s gives 124 for H3 and 81 for Wan 2.2, the counts they were trained on).
 function clipFrames({ fps, grid: [step, offset] }, seconds) {
   return Math.max(1, Math.round((seconds * fps - offset) / step)) * step + offset;
+}
+
+// The newest jobs in the bucket, so a closed or reloaded page can find its videos
+// again. Job ids start with a UTC timestamp, so they sort by age.
+async function recentVideos(limit) {
+  if (!VIDEO_BUCKET) throw httpError(503, 'Video is not set up: VIDEO_BUCKET is empty');
+  const ids = (await gcs.listPrefixes(VIDEO_BUCKET, 'jobs/'))
+    .map((p) => p.slice('jobs/'.length, -1))
+    .filter((id) => /^[\w-]+$/.test(id))
+    .sort()
+    .reverse()
+    .slice(0, Math.min(Math.max(limit, 1), 100));
+  const jobs = await Promise.all(ids.map(async (id) => {
+    const [job, status] = await Promise.all([
+      gcs.readJson(VIDEO_BUCKET, `jobs/${id}/job.json`),
+      gcs.readJson(VIDEO_BUCKET, `jobs/${id}/status.json`),
+    ]);
+    if (!job || !status) return null;
+    return {
+      id,
+      createdAt: job.createdAt,
+      label: job.label,
+      run: job.run,
+      clips: job.segments.length,
+      seconds: Math.round((job.segments.length * job.params.frames) / job.params.fps),
+      state: status.state,
+      step: status.step,
+      clipsDone: status.clipsDone,
+      error: status.error,
+      cancelRequested: Boolean(status.cancelRequested),
+      videoUrl: status.state === 'done' ? `/api/video/${id}/drive.mp4` : null,
+    };
+  }));
+  return { videos: jobs.filter(Boolean) };
+}
+
+// Queued: drop the queue marker so the worker never picks it up. Running: the
+// worker sees jobs/<id>/cancel.json between status checks, interrupts ComfyUI and
+// marks the job cancelled. The flag is written in both cases, which also covers a
+// job the worker claims at the same moment.
+async function cancelVideo(id) {
+  if (!VIDEO_BUCKET) throw httpError(503, 'Video is not set up: VIDEO_BUCKET is empty');
+  const status = await gcs.readJson(VIDEO_BUCKET, `jobs/${id}/status.json`);
+  if (!status) throw httpError(404, 'No such video job');
+  if (!['queued', 'running'].includes(status.state)) return { id, state: status.state };
+  await gcs.uploadJson(VIDEO_BUCKET, `jobs/${id}/cancel.json`, { requestedAt: new Date().toISOString() });
+  if (status.state === 'queued') {
+    await gcs.remove(VIDEO_BUCKET, `queue/${id}.json`);
+    const cancelled = { ...status, state: 'cancelled', updatedAt: new Date().toISOString() };
+    await gcs.uploadJson(VIDEO_BUCKET, `jobs/${id}/status.json`, cancelled);
+    return { id, state: 'cancelled' };
+  }
+  await gcs.uploadJson(VIDEO_BUCKET, `jobs/${id}/status.json`, { ...status, cancelRequested: true });
+  return { id, state: 'cancelling' };
 }
 
 async function videoStatus(id) {

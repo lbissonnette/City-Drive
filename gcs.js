@@ -62,9 +62,32 @@ async function readJson(bucket, name) {
   }
 }
 
+// Deletes an object; a missing one is fine.
+async function remove(bucket, name) {
+  try {
+    await request(objectUrl(bucket, name), { method: 'DELETE' });
+  } catch (err) {
+    if (err.status !== 404) throw err;
+  }
+}
+
+// "Folder" names directly under prefix (e.g. jobs/<id>/ for prefix jobs/), all pages.
+async function listPrefixes(bucket, prefix) {
+  const prefixes = [];
+  let pageToken = '';
+  do {
+    const params = new URLSearchParams({ prefix, delimiter: '/', fields: 'prefixes,nextPageToken' });
+    if (pageToken) params.set('pageToken', pageToken);
+    const data = await (await request(`https://storage.googleapis.com/storage/v1/b/${bucket}/o?${params}`)).json();
+    prefixes.push(...(data.prefixes || []));
+    pageToken = data.nextPageToken || '';
+  } while (pageToken);
+  return prefixes;
+}
+
 // Raw fetch Response for the object's bytes; forwards a Range header if given.
 function download(bucket, name, range) {
   return request(`${objectUrl(bucket, name)}?alt=media`, { headers: range ? { Range: range } : {} });
 }
 
-module.exports = { accessToken, upload, uploadJson, readJson, download };
+module.exports = { accessToken, upload, uploadJson, readJson, remove, listPrefixes, download };
