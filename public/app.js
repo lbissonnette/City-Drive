@@ -410,7 +410,7 @@ function updateVideoInfo() {
   // Matches the server's selection: every Nth frame plus the last one.
   const used = Math.ceil(saved.frames / videoStride()) + ((saved.frames - 1) % videoStride() ? 1 : 0);
   const clips = Math.max(0, used - 1);
-  setStatus('videoInfo', `${clips} clips from run ${saved.run}, about ${Math.round((clips * 81) / 16)} s of video.`);
+  setStatus('videoInfo', `${clips} clips from run ${saved.run}, about ${Math.round(clips * (window.CITY_DRIVE_CONFIG?.clipSeconds || 5))} s of video.`);
 }
 
 async function makeVideo() {

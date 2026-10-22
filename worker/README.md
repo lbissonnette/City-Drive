@@ -35,10 +35,10 @@ Written by `createVideoJob()` in `server.js`:
   "version": 1,
   "id": "20261021223443-8d5d2d",
   "run": "2026-10-21T22-34-43-526Z_2014",
-  "workflow": "wan22_flf2v_fast",
+  "workflow": "minimax_h3_flf2v_turbo",
   "prompt": "Dashcam footage from a car driving smoothly forward…",
   "negativePrompt": "static, frozen, camera shake…",
-  "params": { "width": 640, "height": 640, "frames": 81, "fps": 16, "seed": 1178908316 },
+  "params": { "width": 768, "height": 768, "frames": 124, "fps": 24, "seed": 1178908316 },
   "images": ["runs/<run>/frame_0001.jpg", "runs/<run>/frame_0002.jpg", "…"],
   "segments": [
     { "index": 0, "first": "runs/<run>/frame_0001.jpg", "last": "runs/<run>/frame_0002.jpg" },
@@ -66,32 +66,47 @@ when the worker claims it, so if the spot VM is preempted mid-job that job stays
 
 ## The model
 
-Default: **Wan 2.2 14B image-to-video** with ComfyUI's native first+last-frame node
-(`WanFirstLastFrameToVideo`), Apache 2.0 licensed. Two workflows ship:
+Default: **MiniMax H3** (Hailuo 3.0), using ComfyUI's native `MiniMaxH3ImageToVideo`
+node with both `first_frame` and `last_frame` connected (H3's "fl2va" mode). The
+workflow mirrors ComfyUI's own `video_minimax_h3_i2v` template, with the same model
+files from [Comfy-Org/MiniMax-H3](https://huggingface.co/Comfy-Org/MiniMax-H3):
+
+| File | Folder | Size |
+| --- | --- | --- |
+| `minimax_h3_fl2va_pruned_int8_convrot.safetensors` | `diffusion_models` | 19.5 GB |
+| `qwen3vl_32b_minimax_h3_nvfp4_awq.safetensors` | `text_encoders` | 14.6 GB |
+| `minimax_h3_video_vae_int8_convrot.safetensors` | `vae` | 2.6 GB |
+| `minimax_h3_fl2v_turbo_8step_v1.0_comfyui_bf16.safetensors` ([lightx2v](https://huggingface.co/lightx2v/Minimax-h3-Turbo)) | `loras` | 1.8 GB |
 
 | Workflow | Steps | Notes |
 | --- | --- | --- |
-| `wan22_flf2v_fast` (default) | 4 | Adds the lightx2v 4-step distillation LoRAs. Several times faster, slightly softer motion |
-| `wan22_flf2v` | 20 | The stock two-pass (high-noise then low-noise) setup at cfg 3.5 |
+| `minimax_h3_flf2v_turbo` (default) | 8 | Adds the lightx2v 8-step turbo LoRA. Much faster per clip |
+| `minimax_h3_flf2v` | 20 | The template's stock settings (`res_multistep`, simple schedule) |
+| `wan22_flf2v_fast` | 4 | Wan 2.2 14B + lightx2v 4-step LoRAs. Needs `install-wan=true` VM metadata |
+| `wan22_flf2v` | 20 | Wan 2.2 14B, stock two-pass setup |
 
-81 frames at 16 fps is a ~5 s clip, Wan's native length. Frames are generated at the
-saved image size (640×640 by default).
+H3 clips are 124 frames at 24 fps (~5.2 s; H3 frame counts sit on a 17k+5 grid) on
+H3's native canvas: 768 px short edge, so the 640×640 Street View frames are
+generated at 768×768. H3 also generates an audio track; the worker only decodes
+video for now. Choose a different default with `VIDEO_WORKFLOW` on the app, or per
+job with `"params": {"workflow": "<name>"}` on `/api/video`.
 
-**About MiniMax Hailuo / MiniMax H3:** MiniMax's H3 (Hailuo 3.0) weights are reported
-to be on Hugging Face with native ComfyUI first+last-frame support, but its community
-license reportedly excludes the US, EU, UK and South Korea from self-hosting without
-MiniMax's written permission. Check the license on the model card before using it.
-To use H3 (or any other model) where you're allowed to:
+**License:** H3's open weights ship under MiniMax's community license, which is
+reported to leave the US, EU, UK and South Korea out of the self-hosting grant unless
+MiniMax gives written permission. Read it on the model card and make sure your use is
+covered. The Wan 2.2 workflows (Apache 2.0) are the fallback.
 
-1. On the VM, download its files into `/opt/ComfyUI/models/...` (see the ComfyUI
-   docs for the model) and build its first+last-frame workflow in the ComfyUI UI.
+### Adding another model
+
+1. Get its files onto the VM (add `fetch` lines to `vm-startup.sh`) and build its
+   first+last-frame workflow in the ComfyUI UI.
 2. **Export (API)** it to JSON and replace the values the worker should fill with
    these placeholder strings: `{{FIRST_IMAGE}}`, `{{LAST_IMAGE}}` (the two `LoadImage`
    nodes), `{{PROMPT}}`, `{{NEGATIVE_PROMPT}}`, `{{WIDTH}}`, `{{HEIGHT}}`, `{{FRAMES}}`,
    `{{FPS}}`, `{{SEED}}`, and `{{OUTPUT_PREFIX}}` (the save node's filename prefix). The
    workflow must end in a node that saves an `.mp4`/`.webm` (e.g. `SaveVideo`).
-3. Save it as `worker/workflows/<name>.json`, run `./scripts/gpu-vm.sh push`, and pass
-   `"params": {"workflow": "<name>"}` to `/api/video` (or change the default in `server.js`).
+3. Save it as `worker/workflows/<name>.json`, add it to `WORKFLOWS` in `server.js`
+   (frame count, fps, canvas size), and run `./scripts/gpu-vm.sh push`.
 
 ## Running it
 
@@ -111,7 +126,7 @@ PROJECT_ID=city-drive-123456 ./scripts/gpu-vm.sh stop   # stop paying for the GP
 ```
 
 The first boot installs the NVIDIA driver (Google's installer, one automatic reboot),
-ComfyUI with a CUDA 12.8 PyTorch build, and ~40 GB of Wan 2.2 weights from
+ComfyUI with a CUDA 13 PyTorch build, and ~38 GB of MiniMax H3 weights from
 Hugging Face. Allow 20–30 minutes. Later boots reuse the disk and start in a couple
 of minutes. When Google reclaims the spot VM it is **stopped**, not deleted; run `up`
 again to bring it back.
@@ -131,7 +146,7 @@ uses your `gcloud auth login` credentials for Cloud Storage.
 ## Timing and cost
 
 Every pair of frames is one clip, so a 200-frame drive is 199 clips and about
-16 minutes of video. Use **"Use every Nth frame"** in the app to make fewer, longer
+17 minutes of video. Use **"Use every Nth frame"** in the app to make fewer, longer
 jumps; the video model fills in the motion between them. Generation time per clip
 depends on the workflow and size; measure it on the first job (the worker logs
 seconds per clip) and size your drives from that.
