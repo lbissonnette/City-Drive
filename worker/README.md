@@ -189,7 +189,9 @@ ComfyUI never comes up still stops once the worker is running. It does not cover
 first boot that fails before the worker is installed; check `logs` then.
 
 Once the VM exists, **the app starts it for you**: queueing a video starts a stopped
-VM, and the video step has Start/Stop buttons with the VM's current state. That
+VM, and a GPU worker panel at the top of the app shows the VM's state, how long it
+has been up, a rough cost so far (set `GPU_VM_HOURLY_USD` to your spot price), and
+Start/Stop buttons. That
 needs the `cityDriveGpuControl` role `gcp-setup.sh` grants the app's runtime service
 account (re-run the setup script if you set up before this existed). Creating the VM,
 `push` and `logs` still go through `gpu-vm.sh`. Locally, set `GCP_PROJECT_ID` in

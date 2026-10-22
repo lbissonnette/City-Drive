@@ -46,16 +46,23 @@ async function findZone() {
 
 const instanceUrl = async (z) => `${API}/projects/${await project()}/zones/${z}/instances/${VM_NAME}`;
 
-// { name, zone, status, internalIp } where status is a GCE instance status
+// { name, zone, status, internalIp, startedAt } where status is a GCE instance status
 // (RUNNING, TERMINATED = stopped, STAGING, STOPPING, ...) or MISSING if
 // gpu-vm.sh up hasn't created the VM yet. internalIp is the VM's VPC address,
-// which the /comfy/ proxy in server.js connects to.
+// which the /comfy/ proxy in server.js connects to. startedAt is when the
+// current run began (null unless RUNNING), for the app's uptime and cost.
 async function status() {
   const z = await findZone();
   if (!z) return { name: VM_NAME, zone: null, status: 'MISSING' };
   try {
     const vm = await request(await instanceUrl(z));
-    return { name: VM_NAME, zone: z, status: vm.status, internalIp: vm.networkInterfaces?.[0]?.networkIP || null };
+    return {
+      name: VM_NAME,
+      zone: z,
+      status: vm.status,
+      internalIp: vm.networkInterfaces?.[0]?.networkIP || null,
+      startedAt: vm.status === 'RUNNING' ? vm.lastStartTimestamp || null : null,
+    };
   } catch (err) {
     if (err.status !== 404) throw err;
     zone = process.env.GPU_VM_ZONE || ''; // deleted or recreated elsewhere
@@ -75,7 +82,7 @@ async function start() {
   if (s.status === 'MISSING') throw missing();
   if (['TERMINATED', 'STOPPED', 'SUSPENDED'].includes(s.status)) {
     await request(`${await instanceUrl(s.zone)}/${s.status === 'SUSPENDED' ? 'resume' : 'start'}`, 'POST');
-    return { ...s, status: 'STAGING' };
+    return { ...s, status: 'STAGING', startedAt: null };
   }
   return s;
 }
@@ -85,7 +92,7 @@ async function stop() {
   if (s.status === 'MISSING') throw missing();
   if (['RUNNING', 'STAGING', 'PROVISIONING', 'REPAIRING'].includes(s.status)) {
     await request(`${await instanceUrl(s.zone)}/stop`, 'POST');
-    return { ...s, status: 'STOPPING' };
+    return { ...s, status: 'STOPPING', startedAt: null };
   }
   return s;
 }

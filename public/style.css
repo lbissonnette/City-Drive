@@ -6,6 +6,12 @@ body { display: flex; }
 #panel h1 { margin: 0 0 4px; font-size: 20px; }
 #panel h2 { margin: 0 0 8px; font-size: 15px; }
 section { padding: 12px 0; border-top: 1px solid #e5e5e5; }
+/* Stays in view while scrolling the steps, so the VM (and its bill) is never out of sight. */
+#gpuPanel { position: sticky; top: -16px; z-index: 1; background: #fafafa; padding-top: 12px; border-bottom: 1px solid #e5e5e5; }
+#gpuPanel h2 { display: flex; align-items: center; gap: 6px; }
+#gpuPanel .dot { width: 10px; height: 10px; border-radius: 50%; background: #999; }
+#gpuPanel .dot.on { background: #1e8e3e; }
+#gpuPanel .dot.busy { background: #f9ab00; }
 .hint { color: #666; margin: 4px 0 8px; }
 .status { margin: 8px 0 0; color: #333; }
 .status.error { color: #b00020; }

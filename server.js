@@ -62,6 +62,11 @@ const MIME = {
 };
 
 const COMFY_ENABLED = Boolean(VIDEO_BUCKET || comfy.COMFY_URL);
+// Rough costs for the GPU panel's estimate. The default is about the spot price
+// of a g4-standard-48 in us-central1 in Oct 2026; spot prices move, so set your
+// own. The disk (300 GB Hyperdisk) is billed even while the VM is stopped.
+const GPU_HOURLY_USD = Number(process.env.GPU_VM_HOURLY_USD) || 1.7;
+const GPU_DISK_MONTHLY_USD = Number(process.env.GPU_VM_DISK_MONTHLY_USD) || 25;
 
 const server = http.createServer(async (req, res) => {
   try {
@@ -75,6 +80,7 @@ const server = http.createServer(async (req, res) => {
       const config = {
         apiKey: API_KEY, videoEnabled: Boolean(VIDEO_BUCKET), defaultPrompt: prompts.DEFAULT_DRIVE_DESCRIPTION,
         clipSeconds: DEFAULT_CLIP_SECONDS, minClipSeconds: MIN_CLIP_SECONDS, maxClipSeconds: MAX_CLIP_SECONDS,
+        gpuCost: { hourlyUsd: GPU_HOURLY_USD, diskMonthlyUsd: GPU_DISK_MONTHLY_USD },
         comfy: COMFY_ENABLED ? { url: `${comfy.PREFIX}/`, alwaysOn: Boolean(comfy.COMFY_URL) } : null,
       };
       return send(res, 200, `window.CITY_DRIVE_CONFIG = ${JSON.stringify(config)};`, MIME['.js']);
