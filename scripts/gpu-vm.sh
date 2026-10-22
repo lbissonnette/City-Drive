@@ -8,6 +8,7 @@
 #   PROJECT_ID=city-drive-123456 ./scripts/gpu-vm.sh up      # push worker code, create or start the VM
 #   PROJECT_ID=city-drive-123456 ./scripts/gpu-vm.sh push    # push worker code and restart the worker
 #   PROJECT_ID=city-drive-123456 ./scripts/gpu-vm.sh logs    # follow the worker's log
+#   PROJECT_ID=city-drive-123456 ./scripts/gpu-vm.sh tunnel  # ComfyUI's web UI at http://localhost:8188
 #   PROJECT_ID=city-drive-123456 ./scripts/gpu-vm.sh stop    # stop the VM (stops GPU billing; disk is kept)
 #   PROJECT_ID=city-drive-123456 ./scripts/gpu-vm.sh delete  # delete the VM and its disk
 #
@@ -19,6 +20,7 @@
 #   VIDEO_BUCKET   default <PROJECT_ID>-city-drive-video
 #   DISK_SIZE_GB   default 300 (models are ~40 GB; ComfyUI + PyTorch another ~15 GB)
 #   DISK_TYPE      default hyperdisk-balanced (G4 VMs only take Hyperdisk)
+#   TUNNEL_PORT    default 8188, the local port 'tunnel' listens on
 #   IDLE_SHUTDOWN_MINUTES  default 10. The worker powers the VM off (stopped, not
 #                  deleted) after this long with no jobs. 0 keeps it running.
 #                  Applied on 'up'.
@@ -35,6 +37,9 @@ DISK_SIZE_GB="${DISK_SIZE_GB:-300}"
 DISK_TYPE="${DISK_TYPE:-hyperdisk-balanced}"
 IDLE_SHUTDOWN_MINUTES="${IDLE_SHUTDOWN_MINUTES:-10}"
 VM=city-drive-gpu
+TAG=city-drive-gpu
+COMFY_FIREWALL=city-drive-comfyui
+TUNNEL_PORT="${TUNNEL_PORT:-8188}"
 WORKER_SA="city-drive-gpu-worker@${PROJECT_ID}.iam.gserviceaccount.com"
 
 gc() { gcloud --project="$PROJECT_ID" --quiet "$@"; }
@@ -66,18 +71,31 @@ push_worker() {
     --exclude='__pycache__/.*' worker "gs://$VIDEO_BUCKET/worker"
 }
 
+# Lets the Cloud Run app (Direct VPC egress from the region's default subnet)
+# reach ComfyUI on port 8188 for its /comfy/ proxy. Nothing outside the VPC can.
+comfy_firewall() {
+  gc compute firewall-rules describe "$COMFY_FIREWALL" >/dev/null 2>&1 && return
+  local range
+  range="$(gc compute networks subnets describe default --region="$REGION" --format='value(ipCidrRange)')"
+  log "Allowing ComfyUI (tcp:8188) from the default subnet $range"
+  gc compute firewall-rules create "$COMFY_FIREWALL" --network=default --direction=INGRESS \
+    --allow=tcp:8188 --source-ranges="$range" --target-tags="$TAG"
+}
+
 vm_status() { gc compute instances describe "$VM" --zone="$ZONE" --format='value(status)' 2>/dev/null || true; }
 
 case "$CMD" in
   up)
     preflight
     push_worker
+    comfy_firewall
     status="$(vm_status)"
     if [[ -z "$status" ]]; then
       log "Creating spot VM $VM ($MACHINE_TYPE) in $ZONE"
       gc compute instances create "$VM" \
         --zone="$ZONE" \
         --machine-type="$MACHINE_TYPE" \
+        --tags="$TAG" \
         --provisioning-model=SPOT \
         --instance-termination-action=STOP \
         --maintenance-policy=TERMINATE \
@@ -89,11 +107,13 @@ case "$CMD" in
       echo "First boot installs the driver (one reboot), ComfyUI and ~40 GB of models: allow 20-30 minutes."
     elif [[ "$status" != "RUNNING" ]]; then
       log "Starting $VM ($status)"
+      gc compute instances add-tags "$VM" --zone="$ZONE" --tags="$TAG" # VMs created before the ComfyUI firewall rule
       gc compute instances add-metadata "$VM" --zone="$ZONE" \
         --metadata="video-bucket=$VIDEO_BUCKET,idle-shutdown-minutes=$IDLE_SHUTDOWN_MINUTES" --metadata-from-file=startup-script=worker/vm-startup.sh
       gc compute instances start "$VM" --zone="$ZONE"
     else
       log "$VM is already running; updating its startup script and re-running it"
+      gc compute instances add-tags "$VM" --zone="$ZONE" --tags="$TAG"
       gc compute instances add-metadata "$VM" --zone="$ZONE" \
         --metadata="video-bucket=$VIDEO_BUCKET,idle-shutdown-minutes=$IDLE_SHUTDOWN_MINUTES" --metadata-from-file=startup-script=worker/vm-startup.sh
       gc compute ssh "$VM" --zone="$ZONE" --command='sudo google_metadata_script_runner startup'
@@ -108,6 +128,12 @@ case "$CMD" in
   logs)
     gc compute ssh "$VM" --zone="$ZONE" --command='sudo tail -n 50 /var/log/city-drive-startup.log; sudo journalctl -u city-drive-worker -u comfyui -f'
     ;;
+  tunnel)
+    # Forwards ComfyUI over SSH, for when the app's /comfy/ proxy isn't an option
+    # (e.g. running the app locally: set COMFY_URL=http://localhost:8188 in .env).
+    echo "ComfyUI at http://localhost:$TUNNEL_PORT (Ctrl-C to close the tunnel)"
+    gc compute ssh "$VM" --zone="$ZONE" -- -N -L "$TUNNEL_PORT:localhost:8188"
+    ;;
   stop)
     gc compute instances stop "$VM" --zone="$ZONE"
     ;;
@@ -115,7 +141,7 @@ case "$CMD" in
     gc compute instances delete "$VM" --zone="$ZONE"
     ;;
   *)
-    echo "Unknown command $CMD (use up, push, logs, stop or delete)" >&2
+    echo "Unknown command $CMD (use up, push, logs, tunnel, stop or delete)" >&2
     exit 1
     ;;
 esac

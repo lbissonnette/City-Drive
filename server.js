@@ -6,7 +6,8 @@
 // downloads Street View Static images for a planned drive into ./output/.
 // With VIDEO_BUCKET set, saved frames are also copied to Cloud Storage and
 // /api/video queues a job for the GPU worker (see worker/README.md), starting
-// the worker's VM if it is stopped. /api/gpu reports, starts and stops the VM.
+// the worker's VM if it is stopped. /api/gpu reports, starts and stops the VM,
+// and /comfy/ proxies to ComfyUI on it for debugging (see comfy-proxy.js).
 
 const http = require('http');
 const fs = require('fs');
@@ -15,6 +16,7 @@ const crypto = require('crypto');
 const { Readable } = require('stream');
 const gcs = require('./gcs');
 const gpu = require('./compute');
+const comfy = require('./comfy-proxy');
 
 loadDotEnv(path.join(__dirname, '.env'));
 
@@ -58,13 +60,21 @@ const MIME = {
   '.jpg': 'image/jpeg',
 };
 
+const COMFY_ENABLED = Boolean(VIDEO_BUCKET || comfy.COMFY_URL);
+
 const server = http.createServer(async (req, res) => {
   try {
     const url = new URL(req.url, `http://${req.headers.host}`);
+    if (COMFY_ENABLED && url.pathname === comfy.PREFIX) {
+      res.writeHead(301, { Location: `${comfy.PREFIX}/` });
+      return res.end();
+    }
+    if (COMFY_ENABLED && url.pathname.startsWith(`${comfy.PREFIX}/`)) return comfy.handle(req, res);
     if (req.method === 'GET' && url.pathname === '/config.js') {
       const { frames, fps } = WORKFLOWS[DEFAULT_WORKFLOW];
       const config = {
         apiKey: API_KEY, videoEnabled: Boolean(VIDEO_BUCKET), defaultPrompt: DEFAULT_PROMPT, clipSeconds: frames / fps,
+        comfy: COMFY_ENABLED ? { url: `${comfy.PREFIX}/`, alwaysOn: Boolean(comfy.COMFY_URL) } : null,
       };
       return send(res, 200, `window.CITY_DRIVE_CONFIG = ${JSON.stringify(config)};`, MIME['.js']);
     }
@@ -98,6 +108,12 @@ const server = http.createServer(async (req, res) => {
     console.error(err);
     sendJson(res, err.status || 500, { error: err.message });
   }
+});
+
+// ComfyUI's WebSocket; nothing else in the app upgrades.
+server.on('upgrade', (req, socket, head) => {
+  if (COMFY_ENABLED && req.url.startsWith(`${comfy.PREFIX}/`)) return comfy.upgrade(req, socket, head);
+  socket.destroy();
 });
 
 server.listen(PORT, () => console.log(`City Drive running at http://localhost:${PORT}`));

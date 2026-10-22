@@ -106,6 +106,9 @@ mkdir -p "$WORKER"
 gcloud storage rsync --recursive --delete-unmatched-destination-objects "gs://$BUCKET/worker" "$WORKER"
 
 # --- 6. Services ------------------------------------------------------------------------
+# ComfyUI listens on all interfaces so the app's /comfy/ proxy can reach it over
+# the VPC. Only the default network's internal traffic and the city-drive-comfyui
+# firewall rule (scripts/gpu-vm.sh) allow port 8188; there is no rule from the internet.
 cat > /etc/systemd/system/comfyui.service <<EOF
 [Unit]
 Description=ComfyUI
@@ -113,7 +116,7 @@ After=network-online.target
 
 [Service]
 WorkingDirectory=$COMFY
-ExecStart=$COMFY/venv/bin/python main.py --listen 127.0.0.1 --port 8188
+ExecStart=$COMFY/venv/bin/python main.py --listen 0.0.0.0 --port 8188
 Restart=always
 
 [Install]
