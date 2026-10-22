@@ -44,6 +44,15 @@ const WORKFLOWS = {
   wan22_flf2v: { label: 'Wan 2.2 quality', model: 'Wan 2.2 14B', steps: 20, fps: 16, grid: [4, 1], canvas: (w, h) => [w, h] },
   wan22_flf2v_fast: { label: 'Wan 2.2 fast', model: 'Wan 2.2 14B + lightx2v LoRAs', steps: 4, fps: 16, grid: [4, 1], canvas: (w, h) => [w, h] },
 };
+// "Year style": image-edit workflows that restyle every keyframe to an era before
+// the clips are made (worker.py restyle_frames). Qwen-Image-Edit-2511 (Apache 2.0)
+// takes up to three pictures, which is what chaining each frame on the previous
+// restyled one needs. Times are rough per-frame estimates on the RTX PRO 6000.
+const RESTYLE_WORKFLOWS = {
+  restyle_qwen_edit_2511: { label: 'Quality', model: 'Qwen-Image-Edit-2511', steps: 20, secondsPerFrame: 40 },
+  restyle_qwen_edit_2511_fast: { label: 'Fast', model: 'Qwen-Image-Edit-2511 + Lightning LoRA', steps: 4, secondsPerFrame: 8 },
+};
+const DEFAULT_RESTYLE_WORKFLOW = 'restyle_qwen_edit_2511';
 // Seconds of generated video between each pair of frames; the UI can change it per run.
 const DEFAULT_CLIP_SECONDS = 5;
 const MIN_CLIP_SECONDS = 1;
@@ -92,6 +101,10 @@ const server = http.createServer(async (req, res) => {
           name, label: w.label, model: w.model, steps: w.steps, fps: w.fps, grid: w.grid,
         })),
         defaultWorkflow: DEFAULT_WORKFLOW,
+        restyle: {
+          eras: prompts.RESTYLE_ERAS, maxEraLength: prompts.MAX_ERA_LENGTH, defaultWorkflow: DEFAULT_RESTYLE_WORKFLOW,
+          workflows: Object.entries(RESTYLE_WORKFLOWS).map(([name, w]) => ({ name, ...w })),
+        },
         gpuCost: { hourlyUsd: GPU_HOURLY_USD, diskMonthlyUsd: GPU_DISK_MONTHLY_USD },
         comfy: COMFY_ENABLED ? { url: `${comfy.PREFIX}/`, alwaysOn: Boolean(comfy.COMFY_URL) } : null,
       };
@@ -241,7 +254,12 @@ async function downloadFrames({ frames, size = '640x640', fov = 90, pitch = 0, l
 //
 // With speedKmh, each segment gets its own length (segments[].frames, which the
 // worker prefers over params.frames) from the distance between its frames.
-async function createVideoJob({ run, prompt, negativePrompt, stride = 1, maxClips, clipSeconds, speedKmh, params = {} }) {
+//
+// With restyle.era ("Year style"), the job also carries a `restyle` block: the
+// worker first restyles every image to that era, chained frame to frame, writing
+// the results to runs/<run>/restyle-<id>/ next to the originals, and makes the
+// clips between the restyled frames. Jobs without it run as before.
+async function createVideoJob({ run, prompt, negativePrompt, stride = 1, maxClips, clipSeconds, speedKmh, restyle, params = {} }) {
   if (!VIDEO_BUCKET) throw httpError(503, 'Video is not set up: VIDEO_BUCKET is empty');
   if (typeof run !== 'string' || !/^[\w.-]+$/.test(run)) throw httpError(400, 'run must be a saved run name');
   const manifest = await gcs.readJson(VIDEO_BUCKET, `runs/${run}/manifest.json`);
@@ -287,6 +305,11 @@ async function createVideoJob({ run, prompt, negativePrompt, stride = 1, maxClip
   const minFrames = Math.min(...counts);
   const maxFrames = Math.max(...counts);
   const description = prompt || prompts.DEFAULT_DRIVE_DESCRIPTION;
+  const era = typeof restyle?.era === 'string' ? restyle.era.replace(/\s+/g, ' ').trim() : '';
+  if (era.length > prompts.MAX_ERA_LENGTH) throw httpError(400, `Year style must be at most ${prompts.MAX_ERA_LENGTH} characters`);
+  const restyleWorkflow = restyle?.workflow || DEFAULT_RESTYLE_WORKFLOW;
+  const restylePreset = era && Object.hasOwn(RESTYLE_WORKFLOWS, restyleWorkflow) && RESTYLE_WORKFLOWS[restyleWorkflow];
+  if (era && !restylePreset) throw httpError(400, `Unknown restyle workflow ${restyleWorkflow}`);
   const id = `${new Date().toISOString().replace(/[-:.TZ]/g, '').slice(0, 14)}-${crypto.randomBytes(3).toString('hex')}`;
   const job = {
     version: 1,
@@ -315,7 +338,20 @@ async function createVideoJob({ run, prompt, negativePrompt, stride = 1, maxClip
         clampedShort: plan.filter((c) => c.clamped === 'short').length,
         clampedLong: plan.filter((c) => c.clamped === 'long').length,
       }),
+      ...(era && {
+        restyle: { era, preset: restylePreset.label, model: restylePreset.model, steps: restylePreset.steps, frames: images.length },
+      }),
     },
+    ...(era && {
+      restyle: {
+        era,
+        workflow: restyleWorkflow,
+        ...prompts.restylePrompts(era),
+        // One seed for every frame, so the chained edits stay alike.
+        seed: Number.isInteger(restyle.seed) ? restyle.seed : crypto.randomInt(2 ** 31),
+        output: `runs/${run}/restyle-${id}/`,
+      },
+    }),
     images,
     segments: images.slice(1).map((last, i) => ({
       index: i,
@@ -327,6 +363,7 @@ async function createVideoJob({ run, prompt, negativePrompt, stride = 1, maxClip
         seconds: plan[i].seconds,
         turn: prompts.headingDelta(Number(frames[i].heading), Number(frames[i + 1].heading)),
         description,
+        era,
       }),
     })),
     output: `jobs/${id}/drive.mp4`,

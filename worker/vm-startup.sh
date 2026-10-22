@@ -2,7 +2,7 @@
 # Startup script for the City Drive GPU worker VM (Ubuntu, G4 / RTX PRO 6000).
 # scripts/gpu-vm.sh passes it as the VM's startup-script, so it runs as root on
 # every boot. Each step skips work that's already done, so after the first boot
-# (driver install, ComfyUI, ~38 GB of models) a restart syncs any new models from
+# (driver install, ComfyUI, ~67 GB of models) a restart syncs any new models from
 # the models bucket and starts the services.
 #
 # Reads instance metadata:
@@ -111,6 +111,7 @@ command -v gcloud >/dev/null || snap install google-cloud-cli --classic
 M="$COMFY/models"
 H3=https://huggingface.co/Comfy-Org/MiniMax-H3/resolve/main
 WAN=https://huggingface.co/Comfy-Org/Wan_2.2_ComfyUI_Repackaged/resolve/main/split_files
+QWEN_EDIT=https://huggingface.co/Comfy-Org/Qwen-Image-Edit_ComfyUI/resolve/main/split_files
 MODELS=( # <group> <folder/file> <url>
   # MiniMax H3 first+last frame to video (the default). Files and URLs are the ones
   # ComfyUI's own video_minimax_h3_i2v template uses (~38 GB).
@@ -119,6 +120,13 @@ MODELS=( # <group> <folder/file> <url>
   "h3 vae/minimax_h3_video_vae_int8_convrot.safetensors $H3/vae/minimax_h3_video_vae_int8_convrot.safetensors"
   # 8-step turbo LoRA used by the "Fast" minimax_h3_flf2v_turbo workflow.
   "h3 loras/minimax_h3_fl2v_turbo_8step_v1.0_comfyui_bf16.safetensors https://huggingface.co/lightx2v/Minimax-h3-Turbo/resolve/main/minimax_h3_fl2v_turbo_8step_v1.0_comfyui_bf16.safetensors"
+  # Qwen-Image-Edit-2511 (Apache 2.0) for the "Year style" restyle_qwen_edit_2511*
+  # workflows, from ComfyUI's image_qwen_image_edit_2511_int8 template (~29 GB).
+  "restyle diffusion_models/qwen_image_edit_2511_int8_convrot.safetensors $QWEN_EDIT/diffusion_models/qwen_image_edit_2511_int8_convrot.safetensors"
+  "restyle text_encoders/qwen_2.5_vl_7b_fp8_scaled.safetensors https://huggingface.co/Comfy-Org/HunyuanVideo_1.5_repackaged/resolve/main/split_files/text_encoders/qwen_2.5_vl_7b_fp8_scaled.safetensors"
+  "restyle vae/qwen_image_vae.safetensors https://huggingface.co/Comfy-Org/Qwen-Image_ComfyUI/resolve/main/split_files/vae/qwen_image_vae.safetensors"
+  # 4-step Lightning LoRA for the "Fast" restyle_qwen_edit_2511_fast workflow.
+  "restyle loras/Qwen-Image-Edit-2511-Lightning-4steps-V1.0-bf16.safetensors https://huggingface.co/lightx2v/Qwen-Image-Edit-2511-Lightning/resolve/main/Qwen-Image-Edit-2511-Lightning-4steps-V1.0-bf16.safetensors"
   # Wan 2.2 14B (Apache 2.0) for the wan22_* workflows. Only seeded when the VM has
   # metadata install-wan=true (~37 GB more).
   "wan diffusion_models/wan2.2_i2v_high_noise_14B_fp8_scaled.safetensors $WAN/diffusion_models/wan2.2_i2v_high_noise_14B_fp8_scaled.safetensors"
@@ -129,7 +137,7 @@ MODELS=( # <group> <folder/file> <url>
   "wan loras/wan2.2_i2v_lightx2v_4steps_lora_v1_high_noise.safetensors $WAN/loras/wan2.2_i2v_lightx2v_4steps_lora_v1_high_noise.safetensors"
   "wan loras/wan2.2_i2v_lightx2v_4steps_lora_v1_low_noise.safetensors $WAN/loras/wan2.2_i2v_lightx2v_4steps_lora_v1_low_noise.safetensors"
 )
-ENABLED=(h3)
+ENABLED=(h3 restyle)
 if [[ "$(metadata install-wan)" == "true" ]]; then ENABLED+=(wan); fi
 
 MODELS_BUCKET="$(metadata models-bucket)"

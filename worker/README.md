@@ -75,6 +75,8 @@ interrupts it, discards the clips and marks the job `cancelled`.
 ### Per job, the worker
 
 1. downloads `images` and uploads them to ComfyUI,
+   - with a `restyle` block ("Year style"), restyles every image to the era first and
+     uses the restyled frames from here on (see [Year style](#year-style-era-restyle)),
 2. for each segment, fills the workflow template (`workflows/<workflow>.json`) with
    the two frames, prompt, size, frame count and seed, queues it, and downloads the clip,
 3. concatenates the clips with ffmpeg, trimming the first frame of every clip after
@@ -178,6 +180,80 @@ What `prompts.js` follows from the guide:
 - H3 has no negative prompt (the workflow uses `BasicGuider`, no CFG), so
   `negativePrompt` only reaches the Wan 2.2 workflows, which get a short plain
   caption instead.
+
+### Year style (era restyle)
+
+**Year style** in the Make video step (off by default) redraws every keyframe as if
+it had been photographed in a chosen era ("1960s", or any free text up to 60
+characters) before any clip is made. The video model then animates between the
+restyled frames, and each clip prompt says the drive is period footage of that era.
+
+The job doc gets a `restyle` block:
+
+```json
+"restyle": {
+  "era": "1960s",
+  "workflow": "restyle_qwen_edit_2511",
+  "prompt": "Restyle Picture 1 so it looks like a photograph taken on this exact street in the 1960s. …",
+  "chainPrompt": "… Picture 2 is the moment just before Picture 1 on the same drive, and Picture 3 is where the drive started …",
+  "negativePrompt": "modern cars, …",
+  "seed": 123456789,
+  "output": "runs/<run>/restyle-<job id>/"
+}
+```
+
+**Chained references.** Restyling each frame on its own would reinvent every car and
+storefront in each frame, and the video model would then morph between unrelated
+designs. Instead the edits are chained, with one seed and one set of instructions:
+
+1. frame 1 is restyled from its Street View image alone (`prompt`);
+2. every later frame is edited with its Street View image as Picture 1, the previous
+   **restyled** frame as Picture 2 and the first restyled frame as Picture 3
+   (`chainPrompt`), which asks for the same look and, for anything visible in both,
+   the same period design.
+
+This is what keeps moving traffic consistent on busy roads: cars are restyled, not
+masked out, and a car still in view in the next frame gets the design it already had.
+Picture 3 holds the overall look steady over long drives, where a chain of
+one-frame-back references alone would slowly drift.
+
+Restyled frames are uploaded to `runs/<run>/restyle-<job id>/frame_0001.png`… next to
+the originals as they are made. A resumed job downloads them rather than redoing
+them, so the chain continues from where it stopped.
+
+**Model: Qwen-Image-Edit-2511** (Apache 2.0, ComfyUI-native nodes in the pinned
+ComfyUI v0.37.0, int8 weights from ComfyUI's own `image_qwen_image_edit_2511_int8`
+template, ~29 GB with its text encoder, VAE and Lightning LoRA). It was picked because:
+
+- `TextEncodeQwenImageEditPlus` takes up to three pictures, each fed to both the
+  vision encoder and as a reference latent, which is exactly the frame + previous
+  frame + first frame the chain needs;
+- the 2511 release was tuned for consistency of people and objects across references;
+- the license allows self-hosting and commercial use (unlike FLUX.1 Kontext dev and
+  FLUX.2 dev, non-commercial, or Qwen-Image 2.1, released Sep 2026 under a
+  research-only license). MiniMax publishes no H3-family image-edit model.
+- It fits next to H3 on the 96 GB card (ComfyUI unloads one model to load the other
+  between the restyle pass and the clips).
+
+**No depth/edge conditioning.** The frame being edited is itself the main reference
+latent, so the model keeps its geometry (road, building outlines, car positions)
+without a separate ControlNet; adding depth would mean a custom preprocessor node for
+little gain. Picture 1 is scaled to about 1 MP (1024×1024 for a 640×640 frame) by
+`FluxKontextImageScale`; the H3 workflow scales it to its own canvas.
+
+Two presets:
+
+| Preset | Workflow | Steps / CFG | Rough time per frame* |
+|---|---|---|---|
+| Quality (default) | `restyle_qwen_edit_2511` | 20 / 4.0 | ~40 s |
+| Fast | `restyle_qwen_edit_2511_fast` (Lightning LoRA) | 4 / 1.0 | ~8 s |
+
+\* Estimates, not measured on this VM yet; the worker logs seconds per restyled frame
+and the app shows the average while it runs. At the default ~$1.70/h spot price, 100
+frames cost about $1.90 (Quality, ~67 min) or $0.40 (Fast, ~13 min) on top of the clips.
+
+The models are in `MODELS` in `vm-startup.sh` (group `restyle`), so a running VM needs
+`./scripts/gpu-vm.sh up` (not just `push`) once to download them.
 
 ### Adding another model
 

@@ -19,6 +19,7 @@ section { padding: 12px 0; border-top: 1px solid #e5e5e5; }
 .row.buttons { justify-content: flex-start; }
 .row[hidden] { display: none; }
 input[type=number] { width: 64px; }
+#restyleEra { width: 140px; }
 #videoWorkflow { max-width: 65%; }
 #videoSettings { overflow-wrap: anywhere; }
 button { padding: 6px 12px; border: 1px solid #bbb; border-radius: 6px; background: #fff; cursor: pointer; }

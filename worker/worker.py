@@ -4,6 +4,7 @@ Runs on the RTX PRO 6000 spot VM next to a local ComfyUI. Polls the video
 bucket for queued jobs (written by server.js /api/video), and for each one:
 
   1. downloads the job's ordered frames from gs://<bucket>/runs/<run>/
+     (with a "Year style" era: restyles each one first, see restyle_frames)
   2. for every consecutive pair, queues a first+last-frame-to-video workflow
      in ComfyUI and waits for the ~5 s clip
   3. concatenates the clips with ffmpeg
@@ -146,10 +147,10 @@ def comfy_busy():
         return False
 
 
-def upload_image(path, name):
+def upload_image(path, name, mime="image/jpeg"):
     with open(path, "rb") as f:
         resp = requests.post(f"{COMFY_URL}/upload/image",
-                             files={"image": (name, f, "image/jpeg")},
+                             files={"image": (name, f, mime)},
                              data={"overwrite": "true"}, timeout=60)
     resp.raise_for_status()
     info = resp.json()
@@ -170,6 +171,21 @@ def fill_template(node, values):
     return node
 
 
+def prune_unset(workflow):
+    """Drops nodes with an input filled with None (an optional reference image
+    the job doesn't have, e.g. the first restyled frame has no previous one),
+    and every input wired to a dropped node."""
+    dropped = {k for k, n in workflow.items() if any(v is None for v in n.get("inputs", {}).values())}
+    for k in dropped:
+        del workflow[k]
+    for node in workflow.values():
+        inputs = node.get("inputs", {})
+        for name, v in list(inputs.items()):
+            if isinstance(v, list) and len(v) == 2 and v[0] in dropped:
+                del inputs[name]
+    return workflow
+
+
 def workflow_settings(workflow):
     """What a filled workflow will actually run: model files, LoRAs and steps."""
     models, loras, steps = [], [], None
@@ -184,7 +200,11 @@ def workflow_settings(workflow):
     return {"modelFiles": models, "loras": loras, "steps": steps}
 
 
-def run_workflow(workflow, out_path, ui_workflow=None, job=None):
+VIDEO_EXTS = (".mp4", ".webm", ".mov")
+IMAGE_EXTS = (".png", ".jpg", ".jpeg", ".webp")
+
+
+def run_workflow(workflow, out_path, ui_workflow=None, job=None, exts=VIDEO_EXTS):
     body = {"prompt": workflow, "client_id": CLIENT_ID}
     if ui_workflow:
         # The editable graph: lets ComfyUI's queue/history open the run as a workflow tab.
@@ -212,25 +232,82 @@ def run_workflow(workflow, out_path, ui_workflow=None, job=None):
         if status.get("completed") or entry.get("outputs"):
             break
 
-    # SaveVideo reports its file under an "images" (or "videos") list.
+    # SaveVideo reports its file under an "images" (or "videos") list, SaveImage under "images".
     for output in entry["outputs"].values():
         for items in output.values():
             for item in items if isinstance(items, list) else []:
-                if isinstance(item, dict) and str(item.get("filename", "")).endswith((".mp4", ".webm", ".mov")):
+                if isinstance(item, dict) and str(item.get("filename", "")).lower().endswith(exts):
                     params = {k: item.get(k, "") for k in ("filename", "subfolder", "type")}
                     with requests.get(f"{COMFY_URL}/view", params=params, stream=True, timeout=300) as r:
                         r.raise_for_status()
                         with open(out_path, "wb") as f:
                             shutil.copyfileobj(r.raw, f)
                     return
-    raise RuntimeError(f"No video in ComfyUI outputs: {json.dumps(entry['outputs'])[:2000]}")
+    raise RuntimeError(f"No {'video' if exts == VIDEO_EXTS else 'image'} in ComfyUI outputs: {json.dumps(entry['outputs'])[:2000]}")
 
 
-def clip_timing(timings):
-    """Seconds per clip so far, for the app's job status."""
+def clip_timing(timings, kind="Clip"):
+    """Seconds per clip (or restyled frame) so far, for the app's job status."""
     if not timings:
         return {}
-    return {"lastClipSeconds": round(timings[-1]), "avgClipSeconds": round(sum(timings) / len(timings))}
+    return {f"last{kind}Seconds": round(timings[-1]), f"avg{kind}Seconds": round(sum(timings) / len(timings))}
+
+
+# ---------- Era restyle ----------
+
+def restyle_frames(job, work, comfy_names):
+    """Restyles every keyframe to the job's era (job["restyle"]) before any clip
+    is made, and returns the ComfyUI names of the restyled frames by source image.
+
+    The edits are chained: frame 1 is restyled on its own, then every later frame
+    is edited with the previous restyled frame (Picture 2) and the first one
+    (Picture 3) as references, with the same seed and instructions, so a car,
+    storefront or sign that stays in view keeps the period design it was given
+    instead of being reinvented in each frame. Restyled frames are uploaded to
+    GCS next to the run's originals as they're made; a resumed job downloads
+    those instead of redoing them, which also keeps the chain unbroken."""
+    restyle = job["restyle"]
+    template = json.loads((WORKFLOW_DIR / f"{restyle['workflow']}.json").read_text())
+    (work / "restyled").mkdir(exist_ok=True)
+    total = len(job["images"])
+    restyled, timings = {}, []
+    previous = anchor = None
+    for i, name in enumerate(job["images"]):
+        if cancel_requested(job, force=True):
+            raise JobCancelled()
+        set_status(job, "running", step="restyling frames", clipsDone=0, restyleDone=i, restyleTotal=total,
+                   **clip_timing(timings, "Restyle"))
+        local = work / "restyled" / f"{i:04d}.png"
+        blob = bucket.blob(f"{restyle['output']}frame_{i + 1:04d}.png")
+        if local.exists() and local.stat().st_size > 0:
+            log(f"Job {job['id']}: restyled frame {i + 1}/{total} already made, reusing it")
+        elif blob.exists():
+            blob.download_to_filename(str(local))
+            log(f"Job {job['id']}: restyled frame {i + 1}/{total} already in the bucket, reusing it")
+        else:
+            started = time.time()
+            values = {
+                "PROMPT": restyle["prompt"] if previous is None else restyle["chainPrompt"],
+                "NEGATIVE_PROMPT": restyle.get("negativePrompt", ""),
+                "IMAGE": comfy_names[name],
+                "PREVIOUS_IMAGE": previous,
+                "ANCHOR_IMAGE": anchor,
+                "SEED": restyle["seed"],
+                "OUTPUT_PREFIX": f"city-drive/{job['id']}/restyle_{i:04d}",
+            }
+            workflow = prune_unset(fill_template(template, values))
+            if i == 0:
+                job["settings"] = {**(job.get("settings") or {}), "restyleRun": workflow_settings(workflow)}
+            run_workflow(workflow, local, job=job, exts=IMAGE_EXTS)
+            blob.upload_from_filename(str(local), content_type="image/png")
+            timings.append(time.time() - started)
+            log(f"Job {job['id']}: restyled frame {i + 1}/{total} in {timings[-1]:.0f}s")
+        restyled[name] = upload_image(local, f"{job['id']}_restyled_{i:04d}.png", "image/png")
+        previous = restyled[name]
+        anchor = anchor or previous
+    set_status(job, "running", step="restyling frames", clipsDone=0, restyleDone=total, restyleTotal=total,
+               **clip_timing(timings, "Restyle"))
+    return restyled
 
 
 # ---------- Stitching ----------
@@ -288,6 +365,9 @@ def process(job):
         local = work / "frames" / f"{i:04d}.jpg"
         bucket.blob(name).download_to_filename(str(local))
         comfy_names[name] = upload_image(local, f"{job_id}_{i:04d}.jpg")
+    if job.get("restyle"):
+        # The clips then run between the restyled frames instead of the originals.
+        comfy_names = restyle_frames(job, work, comfy_names)
 
     clips, timings = [], []
     for seg in job["segments"]:

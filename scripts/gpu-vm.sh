@@ -20,8 +20,9 @@
 #   VIDEO_BUCKET   default <PROJECT_ID>-city-drive-video
 #   MODELS_BUCKET  default <PROJECT_ID>-city-drive-models. Model weights; every boot mirrors
 #                  it onto the VM's disk (worker/vm-startup.sh step 4). Applied on 'up'.
-#   DISK_SIZE_GB   default 300. Must hold everything in MODELS_BUCKET (H3 ~38 GB, Wan 2.2
-#                  ~37 GB more) plus ~15 GB for ComfyUI + PyTorch.
+#   DISK_SIZE_GB   default 300. Must hold everything in MODELS_BUCKET (H3 ~38 GB, the
+#                  Qwen-Image-Edit "Year style" restyle ~29 GB, Wan 2.2 ~37 GB more) plus
+#                  ~15 GB for ComfyUI + PyTorch.
 #   DISK_TYPE      default hyperdisk-balanced (G4 VMs only take Hyperdisk)
 #   IMAGE_PROJECT / IMAGE_FAMILY  boot image. Default: the first family in IMAGE_CANDIDATES
 #                  below that exists, preferring images with the NVIDIA driver preinstalled.
@@ -142,7 +143,7 @@ case "$CMD" in
         --service-account="$WORKER_SA" --scopes=cloud-platform \
         --metadata="$METADATA,install-nvidia-driver=True" \
         --metadata-from-file=startup-script=worker/vm-startup.sh
-      echo "First boot sets up the driver, ComfyUI and ~40 GB of models: allow 20-30 minutes"
+      echo "First boot sets up the driver, ComfyUI and ~67 GB of models: allow 20-30 minutes"
       echo "(less once gs://$MODELS_BUCKET is seeded, since models then come from GCS)."
     elif [[ "$status" != "RUNNING" ]]; then
       log "Starting $VM ($status)"
