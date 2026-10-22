@@ -28,15 +28,20 @@ const MAX_FRAMES = 500;
 // Cloud Storage bucket shared with the GPU video worker. Empty = video disabled.
 const VIDEO_BUCKET = process.env.VIDEO_BUCKET || '';
 // ComfyUI workflow templates in worker/workflows/ and the clip shape each model
-// was trained on. canvas() maps the saved image size to the generation size.
+// was trained on. canvas() maps the saved image size to the generation size;
+// grid [step, offset] is the frame counts the model accepts (step * k + offset).
 const WORKFLOWS = {
   // MiniMax H3: 24 fps, frame counts on a 17k+5 grid (124 = ~5.2 s), 768 px short edge.
-  minimax_h3_flf2v_turbo: { frames: 124, fps: 24, canvas: h3Canvas },
-  minimax_h3_flf2v: { frames: 124, fps: 24, canvas: h3Canvas },
-  // Wan 2.2: 81 frames at 16 fps (~5 s), any size in multiples of 16.
-  wan22_flf2v_fast: { frames: 81, fps: 16, canvas: (w, h) => [w, h] },
-  wan22_flf2v: { frames: 81, fps: 16, canvas: (w, h) => [w, h] },
+  minimax_h3_flf2v_turbo: { fps: 24, grid: [17, 5], canvas: h3Canvas },
+  minimax_h3_flf2v: { fps: 24, grid: [17, 5], canvas: h3Canvas },
+  // Wan 2.2: 16 fps, frame counts on a 4k+1 grid (81 = ~5 s), any size in multiples of 16.
+  wan22_flf2v_fast: { fps: 16, grid: [4, 1], canvas: (w, h) => [w, h] },
+  wan22_flf2v: { fps: 16, grid: [4, 1], canvas: (w, h) => [w, h] },
 };
+// Seconds of generated video between each pair of frames; the UI can change it per run.
+const DEFAULT_CLIP_SECONDS = 5;
+const MIN_CLIP_SECONDS = 1;
+const MAX_CLIP_SECONDS = 15;
 const DEFAULT_WORKFLOW = process.env.VIDEO_WORKFLOW || 'minimax_h3_flf2v_turbo';
 
 if (!API_KEY) {
@@ -56,9 +61,9 @@ const server = http.createServer(async (req, res) => {
   try {
     const url = new URL(req.url, `http://${req.headers.host}`);
     if (req.method === 'GET' && url.pathname === '/config.js') {
-      const { frames, fps } = WORKFLOWS[DEFAULT_WORKFLOW];
       const config = {
-        apiKey: API_KEY, videoEnabled: Boolean(VIDEO_BUCKET), defaultPrompt: prompts.DEFAULT_DRIVE_DESCRIPTION, clipSeconds: frames / fps,
+        apiKey: API_KEY, videoEnabled: Boolean(VIDEO_BUCKET), defaultPrompt: prompts.DEFAULT_DRIVE_DESCRIPTION,
+        clipSeconds: DEFAULT_CLIP_SECONDS, minClipSeconds: MIN_CLIP_SECONDS, maxClipSeconds: MAX_CLIP_SECONDS,
       };
       return send(res, 200, `window.CITY_DRIVE_CONFIG = ${JSON.stringify(config)};`, MIME['.js']);
     }
@@ -185,7 +190,7 @@ async function downloadFrames({ frames, size = '640x640', fov = 90, pitch = 0, l
 //   gs://<bucket>/jobs/<id>/status.json  written by the worker as it goes
 //   gs://<bucket>/jobs/<id>/drive.mp4    the finished video
 //   gs://<bucket>/queue/<id>.json        marker the worker picks up and deletes
-async function createVideoJob({ run, prompt, negativePrompt, stride = 1, maxClips, params = {} }) {
+async function createVideoJob({ run, prompt, negativePrompt, stride = 1, maxClips, clipSeconds, params = {} }) {
   if (!VIDEO_BUCKET) throw httpError(503, 'Video is not set up: VIDEO_BUCKET is empty');
   if (typeof run !== 'string' || !/^[\w.-]+$/.test(run)) throw httpError(400, 'run must be a saved run name');
   const manifest = await gcs.readJson(VIDEO_BUCKET, `runs/${run}/manifest.json`);
@@ -201,9 +206,13 @@ async function createVideoJob({ run, prompt, negativePrompt, stride = 1, maxClip
   const workflow = params.workflow || DEFAULT_WORKFLOW;
   const preset = WORKFLOWS[workflow];
   if (!preset) throw httpError(400, `Unknown workflow ${workflow}`);
+  clipSeconds = clipSeconds == null || clipSeconds === '' ? DEFAULT_CLIP_SECONDS : Number(clipSeconds);
+  if (!(clipSeconds >= MIN_CLIP_SECONDS && clipSeconds <= MAX_CLIP_SECONDS)) {
+    throw httpError(400, `Clip length must be between ${MIN_CLIP_SECONDS} and ${MAX_CLIP_SECONDS} seconds`);
+  }
   const [width, height] = preset.canvas(...(manifest.size || '640x640').split('x').map(Number));
-  const clipFrames = Number(params.frames) || preset.frames;
-  const clipFps = Number(params.fps) || preset.fps;
+  const frameCount = Number(params.frames) || clipFrames(preset, clipSeconds);
+  const fps = Number(params.fps) || preset.fps;
   const description = prompt || prompts.DEFAULT_DRIVE_DESCRIPTION;
   const id = `${new Date().toISOString().replace(/[-:.TZ]/g, '').slice(0, 14)}-${crypto.randomBytes(3).toString('hex')}`;
   const job = {
@@ -218,8 +227,8 @@ async function createVideoJob({ run, prompt, negativePrompt, stride = 1, maxClip
     params: {
       width,
       height,
-      frames: clipFrames,
-      fps: clipFps,
+      frames: frameCount,
+      fps,
       seed: Number.isInteger(params.seed) ? params.seed : crypto.randomInt(2 ** 31),
     },
     images,
@@ -228,7 +237,7 @@ async function createVideoJob({ run, prompt, negativePrompt, stride = 1, maxClip
       first: images[i],
       last,
       prompt: prompts.clipPrompt(workflow, {
-        seconds: clipFrames / clipFps,
+        seconds: frameCount / fps,
         turn: prompts.headingDelta(Number(frames[i].heading), Number(frames[i + 1].heading)),
         description,
       }),
@@ -241,6 +250,12 @@ async function createVideoJob({ run, prompt, negativePrompt, stride = 1, maxClip
   });
   await gcs.uploadJson(VIDEO_BUCKET, `queue/${id}.json`, { id, job: `jobs/${id}/job.json` });
   return { id, clips: job.segments.length, seconds: Math.round((job.segments.length * job.params.frames) / job.params.fps) };
+}
+
+// Frame count closest to the requested clip length that the model accepts
+// (5 s gives 124 for H3 and 81 for Wan 2.2, the counts they were trained on).
+function clipFrames({ fps, grid: [step, offset] }, seconds) {
+  return Math.max(1, Math.round((seconds * fps - offset) / step)) * step + offset;
 }
 
 async function videoStatus(id) {
