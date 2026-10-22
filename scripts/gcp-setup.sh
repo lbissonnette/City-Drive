@@ -9,6 +9,7 @@
 #   - a Google Maps API key stored in Secret Manager as google-maps-api-key
 #   - the video bucket shared by the app and the GPU worker, and the
 #     city-drive-gpu-worker SA the GPU VM runs as (see scripts/gpu-vm.sh)
+#   - a cityDriveGpuControl role that lets the app start and stop that VM
 # Then prints the GitHub repository variables to add (or sets them with `gh` if it can).
 #
 # Safe to re-run: each step checks for what already exists.
@@ -44,6 +45,7 @@ WORKER_SA_NAME=city-drive-gpu-worker
 POOL=github
 PROVIDER=github
 SECRET=google-maps-api-key
+GPU_ROLE=cityDriveGpuControl
 
 DEPLOY_SA="${DEPLOY_SA_NAME}@${PROJECT_ID}.iam.gserviceaccount.com"
 RUNTIME_SA="${RUNTIME_SA_NAME}@${PROJECT_ID}.iam.gserviceaccount.com"
@@ -181,6 +183,27 @@ for sa in "$RUNTIME_SA" "$WORKER_SA"; do
 done
 gc projects add-iam-policy-binding "$PROJECT_ID" \
   --member="serviceAccount:$WORKER_SA" --role=roles/logging.logWriter --condition=None >/dev/null
+
+# --- GPU VM control from the app -----------------------------------------------
+# The app starts the GPU VM when a video job is queued and has Start/Stop
+# buttons. A custom role keeps that to finding, starting and stopping VMs
+# (no create, delete or SSH). It's project-wide because gpu-vm.sh creates the
+# VM after this script runs.
+log "Role $GPU_ROLE for $RUNTIME_SA_NAME"
+gpu_perms=compute.instances.get,compute.instances.list,compute.instances.start,compute.instances.stop,compute.instances.resume
+if gc iam roles describe "$GPU_ROLE" >/dev/null 2>&1; then
+  gc iam roles update "$GPU_ROLE" --permissions="$gpu_perms" >/dev/null
+  echo "Exists, permissions refreshed."
+else
+  gc iam roles create "$GPU_ROLE" --title="City Drive GPU VM control" \
+    --description="Start, stop and check the City Drive GPU worker VM" --permissions="$gpu_perms" >/dev/null
+fi
+gc projects add-iam-policy-binding "$PROJECT_ID" \
+  --member="serviceAccount:$RUNTIME_SA" --role="projects/$PROJECT_ID/roles/$GPU_ROLE" --condition=None >/dev/null
+# Starting a VM that runs as a service account can require acting as it.
+gc iam service-accounts add-iam-policy-binding "$WORKER_SA" \
+  --member="serviceAccount:$RUNTIME_SA" --role=roles/iam.serviceAccountUser >/dev/null
+echo "$RUNTIME_SA_NAME can start and stop the GPU VM."
 
 # --- Workload Identity Federation ---------------------------------------------
 log "Workload Identity Federation for $GITHUB_REPO"

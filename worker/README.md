@@ -140,6 +140,13 @@ running until you stop it. The window applies from boot too, so a VM whose setup
 ComfyUI never comes up still stops once the worker is running. It does not cover a
 first boot that fails before the worker is installed; check `logs` then.
 
+Once the VM exists, **the app starts it for you**: queueing a video starts a stopped
+VM, and the video step has Start/Stop buttons with the VM's current state. That
+needs the `cityDriveGpuControl` role `gcp-setup.sh` grants the app's runtime service
+account (re-run the setup script if you set up before this existed). Creating the VM,
+`push` and `logs` still go through `gpu-vm.sh`. Locally, set `GCP_PROJECT_ID` in
+`.env`; your gcloud login needs the same start/stop permissions.
+
 To run the app locally against the bucket, set `VIDEO_BUCKET` in `.env`; the server
 uses your `gcloud auth login` credentials for Cloud Storage.
 

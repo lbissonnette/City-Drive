@@ -5,7 +5,8 @@
 // Serves the map UI, proxies driving-route requests to the Routes API, and
 // downloads Street View Static images for a planned drive into ./output/.
 // With VIDEO_BUCKET set, saved frames are also copied to Cloud Storage and
-// /api/video queues a job for the GPU worker (see worker/README.md).
+// /api/video queues a job for the GPU worker (see worker/README.md), starting
+// the worker's VM if it is stopped. /api/gpu reports, starts and stops the VM.
 
 const http = require('http');
 const fs = require('fs');
@@ -13,6 +14,7 @@ const path = require('path');
 const crypto = require('crypto');
 const { Readable } = require('stream');
 const gcs = require('./gcs');
+const gpu = require('./compute');
 
 loadDotEnv(path.join(__dirname, '.env'));
 
@@ -74,6 +76,12 @@ const server = http.createServer(async (req, res) => {
     }
     if (req.method === 'POST' && url.pathname === '/api/video') {
       return sendJson(res, 200, await createVideoJob(await readJson(req)));
+    }
+    if (url.pathname === '/api/gpu' || url.pathname.startsWith('/api/gpu/')) {
+      if (!VIDEO_BUCKET) throw httpError(503, 'Video is not set up: VIDEO_BUCKET is empty');
+      if (req.method === 'GET' && url.pathname === '/api/gpu') return sendJson(res, 200, await gpu.status());
+      if (req.method === 'POST' && url.pathname === '/api/gpu/start') return sendJson(res, 200, await gpu.start());
+      if (req.method === 'POST' && url.pathname === '/api/gpu/stop') return sendJson(res, 200, await gpu.stop());
     }
     const videoMatch = url.pathname.match(/^\/api\/video\/([\w-]+)(\/drive\.mp4)?$/);
     if (req.method === 'GET' && videoMatch) {
@@ -229,7 +237,18 @@ async function createVideoJob({ run, prompt, negativePrompt, stride = 1, maxClip
     state: 'queued', clipsDone: 0, clipsTotal: job.segments.length, updatedAt: job.createdAt,
   });
   await gcs.uploadJson(VIDEO_BUCKET, `queue/${id}.json`, { id, job: `jobs/${id}/job.json` });
-  return { id, clips: job.segments.length, seconds: Math.round((job.segments.length * job.params.frames) / job.params.fps) };
+  // Wake the worker. The job is already queued, so a failure here (no VM yet,
+  // no spot capacity, missing permission) is reported rather than thrown.
+  let vm;
+  try {
+    vm = await gpu.start();
+  } catch (err) {
+    console.error(err);
+    vm = { status: 'UNKNOWN', error: err.message };
+  }
+  return {
+    id, clips: job.segments.length, seconds: Math.round((job.segments.length * job.params.frames) / job.params.fps), vm,
+  };
 }
 
 async function videoStatus(id) {

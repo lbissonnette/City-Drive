@@ -56,7 +56,14 @@
 
     <section id="videoSection" hidden>
       <h2>5. Make a video</h2>
-      <p class="hint">Queues a job for the GPU worker: one ~5 s clip between each pair of consecutive saved frames, stitched into a single video.</p>
+      <p class="hint">Queues a job for the GPU worker: one ~5 s clip between each pair of consecutive saved frames, stitched into a single video. The worker's VM starts on its own when you queue a job and stops itself once it has been idle for a while.</p>
+      <div class="row">
+        <span id="gpuStatus" class="status">GPU worker: checking…</span>
+        <span>
+          <button id="gpuStartBtn" disabled>Start</button>
+          <button id="gpuStopBtn" disabled>Stop</button>
+        </span>
+      </div>
       <label for="videoPrompt">Prompt</label>
       <textarea id="videoPrompt" rows="3"></textarea>
       <label class="row">Use every Nth frame
