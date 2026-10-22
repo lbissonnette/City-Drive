@@ -18,7 +18,7 @@ Settings (environment variables):
   WORKFLOW_DIR    default ./workflows next to this file
   WORK_DIR        default /var/lib/city-drive-worker
   POLL_SECONDS    default 15
-  IDLE_SHUTDOWN_MINUTES  default 30. Powers the VM off after this many minutes
+  IDLE_SHUTDOWN_MINUTES  default 10. Powers the VM off after this many minutes
                   with no job running or queued, which stops GPU billing (the
                   VM ends up stopped, like `gpu-vm.sh stop`). 0 disables it.
 """
@@ -41,7 +41,7 @@ COMFY_URL = os.environ.get("COMFY_URL", "http://127.0.0.1:8188").rstrip("/")
 WORKFLOW_DIR = Path(os.environ.get("WORKFLOW_DIR", Path(__file__).parent / "workflows"))
 WORK_DIR = Path(os.environ.get("WORK_DIR", "/var/lib/city-drive-worker"))
 POLL_SECONDS = int(os.environ.get("POLL_SECONDS", "15"))
-IDLE_SHUTDOWN_MINUTES = float(os.environ.get("IDLE_SHUTDOWN_MINUTES", "30"))
+IDLE_SHUTDOWN_MINUTES = float(os.environ.get("IDLE_SHUTDOWN_MINUTES", "10"))
 # On tmpfs, so it survives worker restarts (a crash loop can't keep the VM up
 # forever) but not a reboot (a fresh boot gets a full idle window).
 ACTIVITY_FILE = Path("/run/city-drive-worker/last-activity")

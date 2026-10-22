@@ -6,7 +6,7 @@
 #
 # Reads instance metadata:
 #   video-bucket            the bucket shared with the app (worker code lives in gs://<bucket>/worker/)
-#   idle-shutdown-minutes   power off after this long with no jobs (default 30, 0 = never)
+#   idle-shutdown-minutes   power off after this long with no jobs (default 10, 0 = never)
 #
 # Log: /var/log/city-drive-startup.log (also in the serial console).
 
@@ -20,7 +20,7 @@ metadata() {
 BUCKET="$(metadata video-bucket)"
 [[ -n "$BUCKET" ]] || { echo "video-bucket metadata is not set" >&2; exit 1; }
 IDLE_SHUTDOWN_MINUTES="$(metadata idle-shutdown-minutes)"
-IDLE_SHUTDOWN_MINUTES="${IDLE_SHUTDOWN_MINUTES:-30}"
+IDLE_SHUTDOWN_MINUTES="${IDLE_SHUTDOWN_MINUTES:-10}"
 
 STATE=/var/lib/city-drive
 COMFY=/opt/ComfyUI

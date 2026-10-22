@@ -117,10 +117,10 @@ of minutes. When Google reclaims the spot VM it is **stopped**, not deleted; run
 again to bring it back.
 
 The VM costs money while it runs, so it **stops itself when idle**: once no job has
-run or been queued for 30 minutes, the worker powers it off. That leaves it in the
+run or been queued for 10 minutes, the worker powers it off. That leaves it in the
 same stopped state as `gpu-vm.sh stop` (no GPU billing, disk and models kept), and
 `up` brings it back in a couple of minutes. Change the window with
-`IDLE_SHUTDOWN_MINUTES=60 ./scripts/gpu-vm.sh up`, or set it to `0` to keep the VM
+`IDLE_SHUTDOWN_MINUTES=30 ./scripts/gpu-vm.sh up`, or set it to `0` to keep the VM
 running until you stop it. The window applies from boot too, so a VM whose setup or
 ComfyUI never comes up still stops once the worker is running. It does not cover a
 first boot that fails before the worker is installed; check `logs` then.

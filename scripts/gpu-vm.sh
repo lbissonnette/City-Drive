@@ -19,7 +19,7 @@
 #   VIDEO_BUCKET   default <PROJECT_ID>-city-drive-video
 #   DISK_SIZE_GB   default 300 (models are ~40 GB; ComfyUI + PyTorch another ~15 GB)
 #   DISK_TYPE      default hyperdisk-balanced (G4 VMs only take Hyperdisk)
-#   IDLE_SHUTDOWN_MINUTES  default 30. The worker powers the VM off (stopped, not
+#   IDLE_SHUTDOWN_MINUTES  default 10. The worker powers the VM off (stopped, not
 #                  deleted) after this long with no jobs. 0 keeps it running.
 #                  Applied on 'up'.
 
@@ -33,7 +33,7 @@ MACHINE_TYPE="${MACHINE_TYPE:-g4-standard-48}"
 VIDEO_BUCKET="${VIDEO_BUCKET:-${PROJECT_ID}-city-drive-video}"
 DISK_SIZE_GB="${DISK_SIZE_GB:-300}"
 DISK_TYPE="${DISK_TYPE:-hyperdisk-balanced}"
-IDLE_SHUTDOWN_MINUTES="${IDLE_SHUTDOWN_MINUTES:-30}"
+IDLE_SHUTDOWN_MINUTES="${IDLE_SHUTDOWN_MINUTES:-10}"
 VM=city-drive-gpu
 WORKER_SA="city-drive-gpu-worker@${PROJECT_ID}.iam.gserviceaccount.com"
 
