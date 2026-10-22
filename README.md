@@ -1,9 +1,10 @@
 # City Drive
 
 Plot a drive on a map, pull Google Street View imagery along it (optionally from a
-chosen historic year), and save the frames. Later phases will feed those frames to a
-MiniMax video model to simulate driving the route. Right now this repo is the
-**proof of concept** for the first two pieces: route selection and image fetching.
+chosen historic year), and save the frames. A GPU worker then turns the frames into a
+video of the drive, generating a ~5 s clip between each pair of frames with an
+image-to-video model in ComfyUI and stitching them together (see
+[worker/README.md](worker/README.md)).
 
 ## Run it
 
@@ -47,7 +48,11 @@ script and a GitHub Actions workflow that deploys on every push to `main`.
 4. **Preview and save.** Scrub or play through the frames in the viewer (the arrow on
    the map shows where you are). *Save frames* writes `output/<timestamp>_<year>/`
    containing `frame_0001.jpg…` and a `manifest.json` with each frame's panorama ID,
-   capture date, heading and coordinates, ready for the video stage.
+   capture date, heading and coordinates, ready for the video stage. With
+   `VIDEO_BUCKET` set they're also copied to Cloud Storage.
+5. **Make a video** (only shown when `VIDEO_BUCKET` is set). Edit the prompt, optionally
+   use every Nth frame, and click *Make video*. The app writes a job doc to the bucket,
+   the GPU worker picks it up, and the finished video plays in the panel.
 
 ## How historic imagery works (and its limits)
 
@@ -81,9 +86,13 @@ serves historic panoramas when given their IDs. The trick is finding those IDs:
 
 ```
 server.js          Static file server + /api/route (Routes API) + /api/download (saves frames)
+                   + /api/video (queues a video job, reports status, streams the result)
+gcs.js             Tiny Cloud Storage client (no dependencies)
 public/index.html  UI
 public/app.js      Map, route sampling, Street View scanning, year selection, preview
 public/style.css
 Dockerfile         Container for Cloud Run (see DEPLOY.md)
 scripts/gcp-setup.sh  One-time GCP project + GitHub Actions deploy setup
+scripts/gpu-vm.sh     Create/start/stop the GPU spot VM
+worker/            GPU worker: worker.py, ComfyUI workflows, VM startup script
 ```

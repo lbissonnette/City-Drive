@@ -4,10 +4,15 @@
 //
 // Serves the map UI, proxies driving-route requests to the Routes API, and
 // downloads Street View Static images for a planned drive into ./output/.
+// With VIDEO_BUCKET set, saved frames are also copied to Cloud Storage and
+// /api/video queues a job for the GPU worker (see worker/README.md).
 
 const http = require('http');
 const fs = require('fs');
 const path = require('path');
+const crypto = require('crypto');
+const { Readable } = require('stream');
+const gcs = require('./gcs');
 
 loadDotEnv(path.join(__dirname, '.env'));
 
@@ -19,6 +24,13 @@ const SERVER_KEY = process.env.GOOGLE_MAPS_SERVER_KEY || API_KEY;
 const PUBLIC_DIR = path.join(__dirname, 'public');
 const OUTPUT_DIR = path.join(__dirname, 'output');
 const MAX_FRAMES = 500;
+// Cloud Storage bucket shared with the GPU video worker. Empty = video disabled.
+const VIDEO_BUCKET = process.env.VIDEO_BUCKET || '';
+const DEFAULT_PROMPT =
+  'Dashcam footage from a car driving smoothly forward along the street, steady camera, ' +
+  'continuous forward motion, realistic, natural lighting';
+const DEFAULT_NEGATIVE_PROMPT =
+  'static, frozen, camera shake, jump cut, blurry, distorted, warped buildings, text, watermark, people morphing';
 
 if (!API_KEY) {
   console.error('Missing GOOGLE_MAPS_API_KEY. Copy .env.example to .env and fill it in.');
@@ -37,13 +49,21 @@ const server = http.createServer(async (req, res) => {
   try {
     const url = new URL(req.url, `http://${req.headers.host}`);
     if (req.method === 'GET' && url.pathname === '/config.js') {
-      return send(res, 200, `window.CITY_DRIVE_CONFIG = ${JSON.stringify({ apiKey: API_KEY })};`, MIME['.js']);
+      const config = { apiKey: API_KEY, videoEnabled: Boolean(VIDEO_BUCKET), defaultPrompt: DEFAULT_PROMPT };
+      return send(res, 200, `window.CITY_DRIVE_CONFIG = ${JSON.stringify(config)};`, MIME['.js']);
     }
     if (req.method === 'POST' && url.pathname === '/api/route') {
       return sendJson(res, 200, await computeRoute(await readJson(req)));
     }
     if (req.method === 'POST' && url.pathname === '/api/download') {
       return sendJson(res, 200, await downloadFrames(await readJson(req)));
+    }
+    if (req.method === 'POST' && url.pathname === '/api/video') {
+      return sendJson(res, 200, await createVideoJob(await readJson(req)));
+    }
+    const videoMatch = url.pathname.match(/^\/api\/video\/([\w-]+)(\/drive\.mp4)?$/);
+    if (req.method === 'GET' && videoMatch) {
+      return videoMatch[2] ? streamVideo(req, res, videoMatch[1]) : sendJson(res, 200, await videoStatus(videoMatch[1]));
     }
     if (req.method === 'GET' && url.pathname.startsWith('/output/')) {
       return serveFile(res, OUTPUT_DIR, url.pathname.slice('/output/'.length));
@@ -121,7 +141,9 @@ async function downloadFrames({ frames, size = '640x640', fov = 90, pitch = 0, l
       try {
         const resp = await fetch(`https://maps.googleapis.com/maps/api/streetview?${params}`);
         if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
-        fs.writeFileSync(path.join(runDir, file), Buffer.from(await resp.arrayBuffer()));
+        const bytes = Buffer.from(await resp.arrayBuffer());
+        fs.writeFileSync(path.join(runDir, file), bytes);
+        if (VIDEO_BUCKET) await gcs.upload(VIDEO_BUCKET, `runs/${runName}/${file}`, bytes, 'image/jpeg');
         results[i] = { ...frame, file, ok: true };
       } catch (err) {
         results[i] = { ...frame, file: null, ok: false, error: err.message };
@@ -132,13 +154,86 @@ async function downloadFrames({ frames, size = '640x640', fov = 90, pitch = 0, l
 
   const manifest = { createdAt: new Date().toISOString(), label, size, fov, pitch, frames: results };
   fs.writeFileSync(path.join(runDir, 'manifest.json'), JSON.stringify(manifest, null, 2));
+  if (VIDEO_BUCKET) await gcs.uploadJson(VIDEO_BUCKET, `runs/${runName}/manifest.json`, manifest);
   return {
     run: runName,
+    inBucket: Boolean(VIDEO_BUCKET),
     saved: results.filter((r) => r.ok).length,
     failed: results.filter((r) => !r.ok).length,
     baseUrl: `/output/${runName}/`,
     frames: results,
   };
+}
+
+// Writes a stitching job for the GPU worker (worker/worker.py). The job doc
+// lists the saved frames in order and the consecutive pairs to turn into
+// clips; the worker generates one clip per pair and concatenates them.
+//
+//   gs://<bucket>/jobs/<id>/job.json     the instructions (below)
+//   gs://<bucket>/jobs/<id>/status.json  written by the worker as it goes
+//   gs://<bucket>/jobs/<id>/drive.mp4    the finished video
+//   gs://<bucket>/queue/<id>.json        marker the worker picks up and deletes
+async function createVideoJob({ run, prompt, negativePrompt, stride = 1, maxClips, params = {} }) {
+  if (!VIDEO_BUCKET) throw httpError(503, 'Video is not set up: VIDEO_BUCKET is empty');
+  if (typeof run !== 'string' || !/^[\w.-]+$/.test(run)) throw httpError(400, 'run must be a saved run name');
+  const manifest = await gcs.readJson(VIDEO_BUCKET, `runs/${run}/manifest.json`);
+  if (!manifest) throw httpError(404, `No frames in the bucket for run ${run}. Save frames again.`);
+
+  stride = Math.max(1, Math.floor(Number(stride) || 1));
+  let images = manifest.frames.filter((f) => f.ok).map((f) => `runs/${run}/${f.file}`);
+  images = images.filter((_, i) => i % stride === 0 || i === images.length - 1);
+  if (maxClips) images = images.slice(0, Math.max(1, Number(maxClips)) + 1);
+  if (images.length < 2) throw httpError(400, 'Need at least two saved frames to make a video');
+
+  const [width, height] = (manifest.size || '640x640').split('x').map(Number);
+  const id = `${new Date().toISOString().replace(/[-:.TZ]/g, '').slice(0, 14)}-${crypto.randomBytes(3).toString('hex')}`;
+  const job = {
+    version: 1,
+    id,
+    createdAt: new Date().toISOString(),
+    run,
+    label: manifest.label,
+    workflow: params.workflow || 'wan22_flf2v_fast',
+    prompt: prompt || DEFAULT_PROMPT,
+    negativePrompt: negativePrompt || DEFAULT_NEGATIVE_PROMPT,
+    params: {
+      width,
+      height,
+      // 81 frames at 16 fps is the ~5 s clip Wan was trained on.
+      frames: Number(params.frames) || 81,
+      fps: Number(params.fps) || 16,
+      seed: Number.isInteger(params.seed) ? params.seed : crypto.randomInt(2 ** 31),
+    },
+    images,
+    segments: images.slice(1).map((last, i) => ({ index: i, first: images[i], last })),
+    output: `jobs/${id}/drive.mp4`,
+  };
+  await gcs.uploadJson(VIDEO_BUCKET, `jobs/${id}/job.json`, job);
+  await gcs.uploadJson(VIDEO_BUCKET, `jobs/${id}/status.json`, {
+    state: 'queued', clipsDone: 0, clipsTotal: job.segments.length, updatedAt: job.createdAt,
+  });
+  await gcs.uploadJson(VIDEO_BUCKET, `queue/${id}.json`, { id, job: `jobs/${id}/job.json` });
+  return { id, clips: job.segments.length, seconds: Math.round((job.segments.length * job.params.frames) / job.params.fps) };
+}
+
+async function videoStatus(id) {
+  if (!VIDEO_BUCKET) throw httpError(503, 'Video is not set up: VIDEO_BUCKET is empty');
+  const status = await gcs.readJson(VIDEO_BUCKET, `jobs/${id}/status.json`);
+  if (!status) throw httpError(404, 'No such video job');
+  return { id, ...status, videoUrl: status.state === 'done' ? `/api/video/${id}/drive.mp4` : null };
+}
+
+// Proxies the finished video from the (private) bucket, passing Range through
+// so the browser can seek.
+async function streamVideo(req, res, id) {
+  if (!VIDEO_BUCKET) throw httpError(503, 'Video is not set up: VIDEO_BUCKET is empty');
+  const upstream = await gcs.download(VIDEO_BUCKET, `jobs/${id}/drive.mp4`, req.headers.range);
+  const headers = { 'Content-Type': 'video/mp4', 'Accept-Ranges': 'bytes' };
+  for (const h of ['content-length', 'content-range']) {
+    if (upstream.headers.get(h)) headers[h] = upstream.headers.get(h);
+  }
+  res.writeHead(upstream.status, headers);
+  Readable.fromWeb(upstream.body).pipe(res);
 }
 
 function serveFile(res, root, relPath) {

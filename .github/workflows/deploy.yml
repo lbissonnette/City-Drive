@@ -59,5 +59,8 @@ jobs:
             --timeout=600
           secrets: |
             GOOGLE_MAPS_API_KEY=google-maps-api-key:latest
+          # Empty until gcp-setup.sh has created the bucket; the app then hides the video step.
+          env_vars: |
+            VIDEO_BUCKET=${{ vars.GCP_VIDEO_BUCKET }}
 
       - run: echo "Deployed to ${{ steps.deploy.outputs.url }}"
