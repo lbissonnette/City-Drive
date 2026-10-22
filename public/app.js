@@ -519,7 +519,8 @@ async function loadRecentVideos() {
       const shown = v.cancelRequested && v.state === 'running' ? 'cancelling' : v.state;
       li.innerHTML = `<div>${escapeHtml(when)} · ${escapeHtml(v.label || v.run || '')}</div>` +
         `<div class="meta ${v.state === 'failed' ? 'failed' : ''}">${escapeHtml(shown)}${progress} · ` +
-        `${v.clips} clips, ~${v.seconds} s</div>`;
+        `${v.clips} clips, ~${v.seconds} s</div>` +
+        (v.state === 'failed' && v.error ? `<div class="meta failed">${escapeHtml(v.error.slice(0, 200))}</div>` : '');
       if ((v.state === 'queued' || v.state === 'running') && !v.cancelRequested) {
         const btn = document.createElement('button');
         btn.textContent = 'Cancel';
