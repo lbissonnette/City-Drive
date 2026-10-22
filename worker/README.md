@@ -1,6 +1,7 @@
 # GPU video worker
 
-Turns a saved drive (a sequence of Street View frames) into one video: a ~5 s
+Turns a saved drive (a sequence of Street View frames) into one video: a short
+(5 s by default)
 AI-generated clip between each pair of consecutive frames, stitched together.
 It runs on a Google Cloud **spot VM with an NVIDIA RTX PRO 6000** (96 GB, G4
 machine series) next to a local **ComfyUI**.
@@ -85,7 +86,13 @@ files from [Comfy-Org/MiniMax-H3](https://huggingface.co/Comfy-Org/MiniMax-H3):
 | `wan22_flf2v_fast` | 4 | Wan 2.2 14B + lightx2v 4-step LoRAs. Needs `install-wan=true` VM metadata |
 | `wan22_flf2v` | 20 | Wan 2.2 14B, stock two-pass setup |
 
-H3 clips are 124 frames at 24 fps (~5.2 s; H3 frame counts sit on a 17k+5 grid) on
+Clip length is set per run with **"Seconds per clip"** in the app (1–15 s, default 5;
+`clipSeconds` on `/api/video`). The app turns it into the nearest frame count the model
+accepts and writes it to `params.frames` in job.json, which the worker passes to the
+workflow's `{{FRAMES}}`. At the default, H3 clips are 124 frames at 24 fps (~5.2 s;
+H3 frame counts sit on a 17k+5 grid) and Wan 2.2 clips are 81 frames at 16 fps. Both
+models were trained around 5 s, so much longer clips may drift or loop and take
+proportionally longer to generate. Clips render on
 H3's native canvas: 768 px short edge, so the 640×640 Street View frames are
 generated at 768×768. H3 also generates an audio track; the worker only decodes
 video for now. Choose a different default with `VIDEO_WORKFLOW` on the app, or per
@@ -146,7 +153,7 @@ uses your `gcloud auth login` credentials for Cloud Storage.
 ## Timing and cost
 
 Every pair of frames is one clip, so a 200-frame drive is 199 clips and about
-17 minutes of video. Use **"Use every Nth frame"** in the app to make fewer, longer
+17 minutes of video at 5 s per clip. Use **"Use every Nth frame"** in the app to make fewer, longer
 jumps; the video model fills in the motion between them. Generation time per clip
 depends on the workflow and size; measure it on the first job (the worker logs
 seconds per clip) and size your drives from that.
