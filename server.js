@@ -13,6 +13,7 @@ const path = require('path');
 const crypto = require('crypto');
 const { Readable } = require('stream');
 const gcs = require('./gcs');
+const prompts = require('./prompts');
 
 loadDotEnv(path.join(__dirname, '.env'));
 
@@ -26,11 +27,6 @@ const OUTPUT_DIR = path.join(__dirname, 'output');
 const MAX_FRAMES = 500;
 // Cloud Storage bucket shared with the GPU video worker. Empty = video disabled.
 const VIDEO_BUCKET = process.env.VIDEO_BUCKET || '';
-const DEFAULT_PROMPT =
-  'Dashcam footage from a car driving smoothly forward along the street, steady camera, ' +
-  'continuous forward motion, realistic, natural lighting';
-const DEFAULT_NEGATIVE_PROMPT =
-  'static, frozen, camera shake, jump cut, blurry, distorted, warped buildings, text, watermark, people morphing';
 // ComfyUI workflow templates in worker/workflows/ and the clip shape each model
 // was trained on. canvas() maps the saved image size to the generation size.
 const WORKFLOWS = {
@@ -62,7 +58,7 @@ const server = http.createServer(async (req, res) => {
     if (req.method === 'GET' && url.pathname === '/config.js') {
       const { frames, fps } = WORKFLOWS[DEFAULT_WORKFLOW];
       const config = {
-        apiKey: API_KEY, videoEnabled: Boolean(VIDEO_BUCKET), defaultPrompt: DEFAULT_PROMPT, clipSeconds: frames / fps,
+        apiKey: API_KEY, videoEnabled: Boolean(VIDEO_BUCKET), defaultPrompt: prompts.DEFAULT_DRIVE_DESCRIPTION, clipSeconds: frames / fps,
       };
       return send(res, 200, `window.CITY_DRIVE_CONFIG = ${JSON.stringify(config)};`, MIME['.js']);
     }
@@ -181,7 +177,9 @@ async function downloadFrames({ frames, size = '640x640', fov = 90, pitch = 0, l
 
 // Writes a stitching job for the GPU worker (worker/worker.py). The job doc
 // lists the saved frames in order and the consecutive pairs to turn into
-// clips; the worker generates one clip per pair and concatenates them.
+// clips, each with its own prompt (see prompts.js); the worker generates one
+// clip per pair and concatenates them. `prompt` is the user's description of
+// the drive, which prompts.js wraps in the model's prompt format.
 //
 //   gs://<bucket>/jobs/<id>/job.json     the instructions (below)
 //   gs://<bucket>/jobs/<id>/status.json  written by the worker as it goes
@@ -194,15 +192,19 @@ async function createVideoJob({ run, prompt, negativePrompt, stride = 1, maxClip
   if (!manifest) throw httpError(404, `No frames in the bucket for run ${run}. Save frames again.`);
 
   stride = Math.max(1, Math.floor(Number(stride) || 1));
-  let images = manifest.frames.filter((f) => f.ok).map((f) => `runs/${run}/${f.file}`);
-  images = images.filter((_, i) => i % stride === 0 || i === images.length - 1);
-  if (maxClips) images = images.slice(0, Math.max(1, Number(maxClips)) + 1);
+  let frames = manifest.frames.filter((f) => f.ok);
+  frames = frames.filter((_, i) => i % stride === 0 || i === frames.length - 1);
+  if (maxClips) frames = frames.slice(0, Math.max(1, Number(maxClips)) + 1);
+  const images = frames.map((f) => `runs/${run}/${f.file}`);
   if (images.length < 2) throw httpError(400, 'Need at least two saved frames to make a video');
 
   const workflow = params.workflow || DEFAULT_WORKFLOW;
   const preset = WORKFLOWS[workflow];
   if (!preset) throw httpError(400, `Unknown workflow ${workflow}`);
   const [width, height] = preset.canvas(...(manifest.size || '640x640').split('x').map(Number));
+  const clipFrames = Number(params.frames) || preset.frames;
+  const clipFps = Number(params.fps) || preset.fps;
+  const description = prompt || prompts.DEFAULT_DRIVE_DESCRIPTION;
   const id = `${new Date().toISOString().replace(/[-:.TZ]/g, '').slice(0, 14)}-${crypto.randomBytes(3).toString('hex')}`;
   const job = {
     version: 1,
@@ -211,17 +213,26 @@ async function createVideoJob({ run, prompt, negativePrompt, stride = 1, maxClip
     run,
     label: manifest.label,
     workflow,
-    prompt: prompt || DEFAULT_PROMPT,
-    negativePrompt: negativePrompt || DEFAULT_NEGATIVE_PROMPT,
+    prompt: description,
+    negativePrompt: negativePrompt || prompts.DEFAULT_NEGATIVE_PROMPT,
     params: {
       width,
       height,
-      frames: Number(params.frames) || preset.frames,
-      fps: Number(params.fps) || preset.fps,
+      frames: clipFrames,
+      fps: clipFps,
       seed: Number.isInteger(params.seed) ? params.seed : crypto.randomInt(2 ** 31),
     },
     images,
-    segments: images.slice(1).map((last, i) => ({ index: i, first: images[i], last })),
+    segments: images.slice(1).map((last, i) => ({
+      index: i,
+      first: images[i],
+      last,
+      prompt: prompts.clipPrompt(workflow, {
+        seconds: clipFrames / clipFps,
+        turn: prompts.headingDelta(Number(frames[i].heading), Number(frames[i + 1].heading)),
+        description,
+      }),
+    })),
     output: `jobs/${id}/drive.mp4`,
   };
   await gcs.uploadJson(VIDEO_BUCKET, `jobs/${id}/job.json`, job);

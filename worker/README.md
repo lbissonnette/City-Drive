@@ -36,17 +36,23 @@ Written by `createVideoJob()` in `server.js`:
   "id": "20261021223443-8d5d2d",
   "run": "2026-10-21T22-34-43-526Z_2014",
   "workflow": "minimax_h3_flf2v_turbo",
-  "prompt": "Dashcam footage from a car driving smoothly forward…",
+  "prompt": "The car drives steadily forward in its lane…",
   "negativePrompt": "static, frozen, camera shake…",
   "params": { "width": 768, "height": 768, "frames": 124, "fps": 24, "seed": 1178908316 },
   "images": ["runs/<run>/frame_0001.jpg", "runs/<run>/frame_0002.jpg", "…"],
   "segments": [
-    { "index": 0, "first": "runs/<run>/frame_0001.jpg", "last": "runs/<run>/frame_0002.jpg" },
-    { "index": 1, "first": "runs/<run>/frame_0002.jpg", "last": "runs/<run>/frame_0003.jpg" }
+    { "index": 0, "first": "runs/<run>/frame_0001.jpg", "last": "runs/<run>/frame_0002.jpg",
+      "prompt": "How the reference pictures align with the target video — Picture 1 …" },
+    { "index": 1, "first": "runs/<run>/frame_0002.jpg", "last": "runs/<run>/frame_0003.jpg",
+      "prompt": "…" }
   ],
   "output": "jobs/<id>/drive.mp4"
 }
 ```
+
+`prompt` is the user's description of the drive. Each segment carries the full prompt
+for its clip, built by [`prompts.js`](../prompts.js) (see [Prompts](#prompts) below);
+the worker falls back to the job's `prompt` when a segment has none.
 
 `status.json` goes `queued` → `running` (with `step` and `clipsDone`/`clipsTotal`)
 → `done` or `failed` (with `error`). The app polls it and plays the video when done.
@@ -95,6 +101,40 @@ job with `"params": {"workflow": "<name>"}` on `/api/video`.
 reported to leave the US, EU, UK and South Korea out of the self-hosting grant unless
 MiniMax gives written permission. Read it on the model card and make sure your use is
 covered. The Wan 2.2 workflows (Apache 2.0) are the fallback.
+
+### Prompts
+
+H3 is trained on a fixed prompt structure per input mode, which MiniMax publishes as
+the [h3-prompt-writing skill](https://github.com/MiniMax-AI/MiniMax-H3/tree/main/skills/h3-prompt-writing)
+(the FL2VA rules are in
+[`references/base-en.txt`](https://github.com/MiniMax-AI/MiniMax-H3/blob/main/skills/h3-prompt-writing/references/base-en.txt)).
+For first+last-frame clips that is:
+
+```text
+How the reference pictures align with the target video — Picture 1 (from Shot 1) aligns with the 0.00-second mark of the target video; Picture 2 (from Shot 1) aligns with the 5.17-second mark of the target video.
+
+integrated_multimodal_description: [Shot 1] Live-action, a forward-facing POV shot from the driver's seat begins on the street exactly as shown in Picture 1, … The camera pushes in at a steady speed and pans left with small amplitude as the road bends to the left, … settles into the position, framing and composition established by Picture 2 at the end of the shot.
+
+overall_soundscape: A steady engine hum and the soft roll of tires on asphalt …
+
+non_diegetic_music: N/A
+```
+
+What `prompts.js` follows from the guide:
+
+- The alignment line comes first, verbatim, with the clip's length (frames / fps) as
+  the Picture 2 time. ComfyUI's `MiniMaxH3ImageToVideo` node already prefixes the
+  two images as `<Picture 1>:` / `<Picture 2>:`, so the prompt refers to them by name.
+- FL2VA favors one continuous shot, described as the path from the first frame to
+  the last, ending on Picture 2, rather than two static image descriptions.
+- Camera motion uses the guide's vocabulary (`Push In`, `Pan Left/Right`, amplitude,
+  speed) written as a sentence. Each clip gets a forward push, plus a pan when the
+  heading changes by 15° or more between its two frames.
+- `overall_soundscape` and `non_diegetic_music` are required fields. H3 also
+  generates audio, which the worker currently drops.
+- H3 has no negative prompt (the workflow uses `BasicGuider`, no CFG), so
+  `negativePrompt` only reaches the Wan 2.2 workflows, which get a short plain
+  caption instead.
 
 ### Adding another model
 
