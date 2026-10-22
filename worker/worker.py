@@ -18,6 +18,9 @@ Settings (environment variables):
   WORKFLOW_DIR    default ./workflows next to this file
   WORK_DIR        default /var/lib/city-drive-worker
   POLL_SECONDS    default 15
+  IDLE_SHUTDOWN_MINUTES  default 10. Powers the VM off after this many minutes
+                  with no job running or queued, which stops GPU billing (the
+                  VM ends up stopped, like `gpu-vm.sh stop`). 0 disables it.
 """
 
 import json
@@ -38,6 +41,10 @@ COMFY_URL = os.environ.get("COMFY_URL", "http://127.0.0.1:8188").rstrip("/")
 WORKFLOW_DIR = Path(os.environ.get("WORKFLOW_DIR", Path(__file__).parent / "workflows"))
 WORK_DIR = Path(os.environ.get("WORK_DIR", "/var/lib/city-drive-worker"))
 POLL_SECONDS = int(os.environ.get("POLL_SECONDS", "15"))
+IDLE_SHUTDOWN_MINUTES = float(os.environ.get("IDLE_SHUTDOWN_MINUTES", "10"))
+# On tmpfs, so it survives worker restarts (a crash loop can't keep the VM up
+# forever) but not a reboot (a fresh boot gets a full idle window).
+ACTIVITY_FILE = Path("/run/city-drive-worker/last-activity")
 
 CLIENT_ID = str(uuid.uuid4())
 bucket = storage.Client().bucket(BUCKET)
@@ -71,6 +78,30 @@ def set_status(job, state, **fields):
         json.dumps(status, indent=2), content_type="application/json")
 
 
+# ---------- Idle shutdown ----------
+
+def mark_active():
+    ACTIVITY_FILE.parent.mkdir(parents=True, exist_ok=True)
+    ACTIVITY_FILE.touch()
+
+
+def idle_seconds():
+    if not ACTIVITY_FILE.exists():
+        mark_active()
+    return time.time() - ACTIVITY_FILE.stat().st_mtime
+
+
+def shutdown_if_idle():
+    """Powers the VM off once it has been idle for IDLE_SHUTDOWN_MINUTES."""
+    if IDLE_SHUTDOWN_MINUTES <= 0 or idle_seconds() < IDLE_SHUTDOWN_MINUTES * 60:
+        return
+    log(f"Idle for {IDLE_SHUTDOWN_MINUTES:g} minutes, shutting the VM down")
+    # A guest shutdown leaves the GCE instance TERMINATED (stopped): no GPU or
+    # vCPU billing, disk kept. `gpu-vm.sh up` starts it again.
+    subprocess.run(["shutdown", "-h", "now"], check=False)
+    time.sleep(300)  # wait for systemd to stop us
+
+
 # ---------- ComfyUI ----------
 
 def wait_for_comfy():
@@ -80,6 +111,7 @@ def wait_for_comfy():
             return
         except requests.RequestException:
             log("Waiting for ComfyUI...")
+            shutdown_if_idle()  # don't keep a GPU running if ComfyUI never comes up
             time.sleep(10)
 
 
@@ -211,18 +243,24 @@ def process(job):
 
 def main():
     WORK_DIR.mkdir(parents=True, exist_ok=True)
+    idle_seconds()  # starts the idle clock if this is the first run since boot
     wait_for_comfy()
-    log(f"Polling gs://{BUCKET}/queue/ every {POLL_SECONDS}s")
+    idle = f"shutting down after {IDLE_SHUTDOWN_MINUTES:g} idle minutes" if IDLE_SHUTDOWN_MINUTES > 0 \
+        else "idle shutdown off"
+    log(f"Polling gs://{BUCKET}/queue/ every {POLL_SECONDS}s, {idle}")
     while True:
         job = claim_next_job()
         if not job:
+            shutdown_if_idle()
             time.sleep(POLL_SECONDS)
             continue
+        mark_active()
         try:
             process(job)
         except Exception as err:  # v1: report and move on to the next job
             log(f"Job {job['id']} failed: {err}")
             set_status(job, "failed", error=str(err)[:1000], finishedAt=now())
+        mark_active()  # the idle clock starts when the job ends
 
 
 if __name__ == "__main__":
