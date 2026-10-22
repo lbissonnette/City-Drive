@@ -18,7 +18,8 @@ const state = {
   routeLine: null,   // google.maps.Polyline
   path: [],          // google.maps.LatLng[] (the drive)
   samples: [],       // { latLng, heading, candidates: [{ pano, date }] }
-  frames: [],        // { pano, date, heading, lat, lng }
+  frames: [],        // { pano, date, heading, lat, lng, located }
+  panoLocations: new Map(), // pano id -> { lat, lng } where Google's camera stood
   frameIndex: 0,
   playing: null,
   carMarker: null,
@@ -260,6 +261,8 @@ async function panoramasAt(latLng) {
     return []; // ZERO_RESULTS: no coverage here
   }
   const byPano = new Map();
+  const where = data.location.latLng;
+  if (where) state.panoLocations.set(data.location.pano, { lat: where.lat(), lng: where.lng() });
   byPano.set(data.location.pano, { pano: data.location.pano, date: normaliseDate(data.imageDate) });
   // `data.time` lists the historic panoramas at this spot (what the Google Maps
   // "See more dates" time machine shows). Each entry has a `pano` id and a Date
@@ -333,7 +336,13 @@ function buildFrames() {
     if (pick.exact) exact++; else filled++;
     // Neighbouring samples often land on the same panorama; one frame each.
     if (frames.length && frames[frames.length - 1].pano === pick.pano) continue;
-    frames.push({ pano: pick.pano, date: pick.date, heading: Math.round(s.heading), lat: s.latLng.lat(), lng: s.latLng.lng() });
+    // Where the panorama was taken if known yet (locateFrames fills in the
+    // rest before saving), else the route point it was found from.
+    const at = state.panoLocations.get(pick.pano);
+    frames.push({
+      pano: pick.pano, date: pick.date, heading: Math.round(s.heading),
+      lat: at ? at.lat : s.latLng.lat(), lng: at ? at.lng : s.latLng.lng(), located: Boolean(at),
+    });
   }
   state.frames = frames;
   document.querySelectorAll('.bar').forEach((el) => el.classList.toggle('selected', el.dataset.year === year));
@@ -411,11 +420,39 @@ function stopPlaying() {
   $('playBtn').textContent = 'Play';
 }
 
+// Sets each frame's lat/lng to where its panorama was actually taken. The
+// video step times clips by the distance between frames, and a panorama can be
+// up to 25 m from the route point it was found from. Historic panoramas don't
+// come with a position in the scan, so they're looked up here (once each).
+async function locateFrames(frames) {
+  const missing = [...new Set(frames.filter((f) => !state.panoLocations.has(f.pano)).map((f) => f.pano))];
+  let next = 0;
+  const worker = async () => {
+    while (next < missing.length) {
+      const pano = missing[next++];
+      try {
+        const { data } = await state.sv.getPanorama({ pano });
+        const where = data.location?.latLng;
+        if (where) state.panoLocations.set(pano, { lat: where.lat(), lng: where.lng() });
+      } catch { /* keep the route point */ }
+    }
+  };
+  await Promise.all(Array.from({ length: SCAN_CONCURRENCY }, worker));
+  for (const f of frames) {
+    const at = state.panoLocations.get(f.pano);
+    if (at) Object.assign(f, at, { located: true });
+  }
+}
+
 async function downloadFrames() {
   const year = $('yearSelect').value;
   $('downloadBtn').disabled = true;
-  setStatus('downloadInfo', `Downloading ${state.frames.length} frames…`);
   try {
+    setStatus('downloadInfo', 'Finding where each panorama was taken…');
+    await locateFrames(state.frames);
+    const unlocated = state.frames.filter((f) => !f.located).length;
+    if (unlocated) console.warn(`${unlocated} frames keep their route point; their panorama position was not found`);
+    setStatus('downloadInfo', `Downloading ${state.frames.length} frames…`);
     const resp = await fetch('/api/download', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -424,7 +461,7 @@ async function downloadFrames() {
     const data = await resp.json();
     if (!resp.ok) throw new Error(data.error);
     $('downloadInfo').innerHTML = `Saved ${data.saved} frames${data.failed ? `, ${data.failed} failed` : ''} to ` +
-      `<code>output/${data.run}/</code> (<a href="${data.baseUrl}manifest.json" target="_blank">manifest</a>).`;
+      `<code>output/${data.run}/</code>${unlocated ? ` (${unlocated} without a panorama position)` : ''} (<a href="${data.baseUrl}manifest.json" target="_blank">manifest</a>).`;
     $('downloadInfo').classList.remove('error');
     const points = data.frames.filter((f) => f.ok).map((f) => ({ lat: f.lat, lng: f.lng }));
     state.savedRun = data.inBucket ? { run: data.run, frames: data.saved, points } : null;
@@ -459,11 +496,16 @@ function videoSpeed() {
 function videoPlan(saved) {
   const cfg = window.CITY_DRIVE_CONFIG || {};
   const w = (cfg.workflows || []).find((x) => x.name === $('videoWorkflow').value) || { fps: 24, grid: [17, 5] };
-  return CityDriveTiming.planClips({
-    frames: saved.points, picked: CityDriveTiming.pickFrames(saved.frames, videoStride()), preset: w,
-    speedKmh: videoSpeed(), clipSeconds: videoClipSeconds(),
-    minSeconds: Number($('videoClipSeconds').min), maxSeconds: Number($('videoClipSeconds').max),
+  const minSeconds = Number($('videoClipSeconds').min);
+  const speedKmh = videoSpeed();
+  const minMeters = speedKmh ? (speedKmh / 3.6) * minSeconds : 0;
+  const picked = CityDriveTiming.pickFrames(saved.points, { stride: videoStride(), minMeters });
+  const skipped = CityDriveTiming.pickFrames(saved.points, { stride: videoStride() }).length - picked.length;
+  const clips = CityDriveTiming.planClips({
+    frames: saved.points, picked, preset: w, speedKmh, clipSeconds: videoClipSeconds(),
+    minSeconds, maxSeconds: Number($('videoClipSeconds').max),
   });
+  return { clips, skipped, minMeters };
 }
 
 function updateVideoInfo() {
@@ -473,7 +515,7 @@ function updateVideoInfo() {
   const saved = state.savedRun;
   $('videoBtn').disabled = !saved || saved.frames < 2;
   if (!saved) return setStatus('videoInfo', 'Save frames first.');
-  const plan = videoPlan(saved);
+  const { clips: plan, skipped, minMeters } = videoPlan(saved);
   const seconds = Math.round(plan.reduce((t, c) => t + c.seconds, 0));
   let info = `${plan.length} clips from run ${saved.run}, about ${formatDuration(seconds)} of video.`;
   if (bySpeed && plan.length) {
@@ -484,6 +526,7 @@ function updateVideoInfo() {
     const long = plan.filter((c) => c.clamped === 'long').length;
     const min = $('videoClipSeconds').min;
     const max = $('videoClipSeconds').max;
+    if (skipped) info += ` Skips ${skipped} frame${skipped > 1 ? 's' : ''} less than ${Math.round(minMeters)} m from the previous one (too close for the shortest clip at this speed).`;
     if (short) info += ` ${short} clip${short > 1 ? 's' : ''} with frames very close together will run at the ${min} s minimum, so the drive slows there.`;
     if (long) info += ` ${long} gap${long > 1 ? 's are' : ' is'} too long for ${max} s at this speed, so the drive speeds up there (use more frames or a lower speed).`;
   }

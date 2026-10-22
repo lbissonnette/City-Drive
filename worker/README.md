@@ -110,10 +110,13 @@ Clip length is set per run with **"Clip length"** in the app. By default it come
 **driving speed** (default 30 km/h; `speedKmh` on `/api/video`): Street View panoramas
 are unevenly spaced, so each clip lasts as long as it takes to drive the road between
 its two frames at that speed, which keeps the apparent speed constant. Distances are
-straight lines between consecutive saved frames (summed over any skipped by "Use every
-Nth frame"). Each clip is clamped to 1–15 s, so frames very close together (or the same
-spot twice) run slower, and gaps longer than 15 s of driving run faster; the app lists
-how many clips hit either limit. Each segment in job.json carries its own `frames`
+straight lines between where Google's camera took each saved panorama (looked up when
+frames are saved; a panorama can be up to 25 m from the route point it was found from),
+summed over any frames skipped by "Use every Nth frame". Frames closer to the previous
+one than the shortest clip covers at that speed (8 m at 30 km/h) are left out, since
+their clip would have to play slower. Clips are clamped to 1–15 s, so gaps longer than
+15 s of driving run faster; the app lists skipped frames and clamped clips. Runs saved
+before panorama positions were looked up use the route points, so save frames again. Each segment in job.json carries its own `frames`
 (and `meters`), which the worker passes to the workflow's `{{FRAMES}}`; `params.frames`
 is the count nearest the average, used by a worker that predates per-segment frames.
 The other mode is a fixed **"Seconds per clip"** (1–15 s, default 5; `clipSeconds`).
