@@ -29,6 +29,9 @@
 #   IDLE_SHUTDOWN_MINUTES  default 10. The worker powers the VM off (stopped, not
 #                  deleted) after this long with no jobs. 0 keeps it running.
 #                  Applied on 'up'.
+#   INSTALL_ANIMATE  "true" adds Wan 2.2 Animate + its custom nodes for the face swap
+#                  side project (faceswap/README.md), ~28 GB more. Applied on 'up'; once
+#                  set it stays on the VM until the metadata is changed.
 
 set -euo pipefail
 cd "$(dirname "$0")/.."
@@ -48,6 +51,7 @@ COMFY_FIREWALL=city-drive-comfyui
 TUNNEL_PORT="${TUNNEL_PORT:-8188}"
 WORKER_SA="city-drive-gpu-worker@${PROJECT_ID}.iam.gserviceaccount.com"
 METADATA="video-bucket=$VIDEO_BUCKET,models-bucket=$MODELS_BUCKET,idle-shutdown-minutes=$IDLE_SHUTDOWN_MINUTES"
+[[ "${INSTALL_ANIMATE:-}" == "true" ]] && METADATA+=",install-animate=true"
 
 # project/family pairs, best first. Images with the driver already installed come first:
 # building it with DKMS on the stock Ubuntu 24.04 image fails on its newer kernels.
