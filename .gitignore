@@ -222,3 +222,11 @@ __marimo__/
 # City Drive
 output/
 node_modules/
+
+# Face swap side project: source footage and personal photos never go in the repo
+faceswap/photos/
+faceswap/source/
+*.mkv
+*.mp4
+*.mov
+*.m4v

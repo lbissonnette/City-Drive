@@ -10,6 +10,8 @@
 #   models-bucket           model weights, mirrored into ComfyUI's models folder (see step 4)
 #   idle-shutdown-minutes   power off after this long with no jobs (default 10, 0 = never)
 #   install-wan             "true" to also seed Wan 2.2 for the wan22_* workflows
+#   install-animate         "true" to also seed Wan 2.2 Animate and its custom nodes
+#                           for the face swap side project (faceswap/README.md)
 #
 # Log: /var/log/city-drive-startup.log (also in the serial console).
 
@@ -128,9 +130,19 @@ MODELS=( # <group> <folder/file> <url>
   # 4-step distillation LoRAs used by the default "fast" workflow.
   "wan loras/wan2.2_i2v_lightx2v_4steps_lora_v1_high_noise.safetensors $WAN/loras/wan2.2_i2v_lightx2v_4steps_lora_v1_high_noise.safetensors"
   "wan loras/wan2.2_i2v_lightx2v_4steps_lora_v1_low_noise.safetensors $WAN/loras/wan2.2_i2v_lightx2v_4steps_lora_v1_low_noise.safetensors"
+  # Wan 2.2 Animate 14B (Apache 2.0) for the face swap side project, as ComfyUI's
+  # own video_wan2_2_14B_animate template loads it. Only seeded when the VM has
+  # metadata install-animate=true (~21 GB more, or ~28 GB without install-wan).
+  "animate diffusion_models/Wan2_2-Animate-14B_fp8_e4m3fn_scaled_KJ.safetensors https://huggingface.co/Kijai/WanVideo_comfy_fp8_scaled/resolve/main/Wan22Animate/Wan2_2-Animate-14B_fp8_e4m3fn_scaled_KJ.safetensors"
+  "animate loras/lightx2v_I2V_14B_480p_cfg_step_distill_rank64_bf16.safetensors https://huggingface.co/Kijai/WanVideo_comfy/resolve/main/Lightx2v/lightx2v_I2V_14B_480p_cfg_step_distill_rank64_bf16.safetensors"
+  "animate loras/WanAnimate_relight_lora_fp16.safetensors https://huggingface.co/Kijai/WanVideo_comfy/resolve/main/LoRAs/Wan22_relight/WanAnimate_relight_lora_fp16.safetensors"
+  "animate clip_vision/clip_vision_h.safetensors https://huggingface.co/Comfy-Org/Wan_2.1_ComfyUI_repackaged/resolve/main/split_files/clip_vision/clip_vision_h.safetensors"
+  "animate text_encoders/umt5_xxl_fp8_e4m3fn_scaled.safetensors $WAN/text_encoders/umt5_xxl_fp8_e4m3fn_scaled.safetensors"
+  "animate vae/wan_2.1_vae.safetensors $WAN/vae/wan_2.1_vae.safetensors"
 )
 ENABLED=(h3)
 if [[ "$(metadata install-wan)" == "true" ]]; then ENABLED+=(wan); fi
+if [[ "$(metadata install-animate)" == "true" ]]; then ENABLED+=(animate); fi
 
 MODELS_BUCKET="$(metadata models-bucket)"
 # VMs set up before the models bucket existed have no models-bucket metadata
@@ -161,6 +173,35 @@ for entry in "${MODELS[@]}"; do
     echo "Model $path is missing from $M after the sync" >&2; exit 1
   fi
 done
+
+# --- 4b. Custom nodes for Wan 2.2 Animate (install-animate=true only) --------------------
+# The template's character-replacement path needs three custom node packs: SAM 2
+# masks the person to replace, KJNodes has the point editor and mask helpers, and
+# controlnet_aux has DWPose. Each is pinned; its helper models (SAM 2, DWPose)
+# download themselves on first use. Bumping a pin, or a new venv, reinstalls.
+CUSTOM_NODES=( # <dir> <repo> <commit>
+  "ComfyUI-KJNodes https://github.com/kijai/ComfyUI-KJNodes.git ab72eda7ffad6280422d71ab7d54d3fb87c0ba18"
+  "ComfyUI-segment-anything-2 https://github.com/kijai/ComfyUI-segment-anything-2.git 0c35fff5f382803e2310103357b5e985f5437f32"
+  "comfyui_controlnet_aux https://github.com/Fannovel16/comfyui_controlnet_aux.git a587a4c1594524c1d2de5cd1a86cd868ff448e1c"
+)
+if [[ " ${ENABLED[*]} " == *" animate "* ]]; then
+  export UV_PYTHON_INSTALL_DIR=/opt/uv-python HOME="${HOME:-/root}"
+  # Keep the pinned PyTorch: a node pack's requirements must not swap it out.
+  uv pip freeze --python "$COMFY/venv/bin/python" | grep -E '^(torch|torchvision|torchaudio)==' > "$STATE/torch-constraints.txt"
+  for entry in "${CUSTOM_NODES[@]}"; do
+    read -r dir repo commit <<<"$entry"
+    dest="$COMFY/custom_nodes/$dir"
+    done_flag="$STATE/node-$dir-$commit-$(basename "$DEPS_DONE")"
+    [[ -f "$done_flag" ]] && continue
+    [[ -d "$dest/.git" ]] || git clone -q "$repo" "$dest"
+    git -C "$dest" fetch -q origin "$commit" && git -C "$dest" checkout -q "$commit"
+    if [[ -f "$dest/requirements.txt" ]]; then
+      uv pip install --python "$COMFY/venv/bin/python" -c "$STATE/torch-constraints.txt" -r "$dest/requirements.txt"
+    fi
+    rm -f "$STATE/node-$dir-"*
+    touch "$done_flag"
+  done
+fi
 
 # --- 5. Worker code (pushed to the bucket by scripts/gpu-vm.sh) ------------------------
 mkdir -p "$WORKER"
